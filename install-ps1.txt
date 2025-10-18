@@ -1,0 +1,124 @@
+# SiYuan Git Sync Plugin - Windows Installer
+# Usage: powershell -ExecutionPolicy Bypass -File install.ps1
+
+Write-Host "======================================================" -ForegroundColor Cyan
+Write-Host "  SiYuan Git Sync Plugin - Windows Installer" -ForegroundColor Cyan
+Write-Host "======================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Helper functions
+function Write-Success { param($msg) Write-Host "✓ $msg" -ForegroundColor Green }
+function Write-Error { param($msg) Write-Host "✗ $msg" -ForegroundColor Red }
+function Write-Info { param($msg) Write-Host "ℹ $msg" -ForegroundColor Blue }
+function Write-Warning { param($msg) Write-Host "⚠ $msg" -ForegroundColor Yellow }
+
+# Get SiYuan plugins directory
+$SIYUAN_DIR = "$env:APPDATA\SiYuan\data\plugins"
+Write-Info "Plugin directory: $SIYUAN_DIR"
+Write-Host ""
+
+# Check prerequisites
+Write-Info "Checking prerequisites..."
+
+# Check Node.js
+try {
+    $nodeVersion = node --version
+    Write-Success "Node.js found: $nodeVersion"
+} catch {
+    Write-Error "Node.js is not installed!"
+    Write-Info "Please install from: https://nodejs.org/"
+    exit 1
+}
+
+# Check npm
+try {
+    $npmVersion = npm --version
+    Write-Success "npm found: $npmVersion"
+} catch {
+    Write-Error "npm is not installed!"
+    exit 1
+}
+
+# Check/Create SiYuan directory
+if (-not (Test-Path $SIYUAN_DIR)) {
+    Write-Warning "SiYuan plugins directory not found!"
+    $create = Read-Host "Create directory at $SIYUAN_DIR? (Y/N)"
+    if ($create -eq 'Y' -or $create -eq 'y') {
+        New-Item -ItemType Directory -Path $SIYUAN_DIR -Force | Out-Null
+        Write-Success "Directory created"
+    } else {
+        Write-Error "Installation cancelled"
+        exit 1
+    }
+} else {
+    Write-Success "SiYuan plugins directory found"
+}
+
+Write-Host ""
+Write-Info "Installing dependencies..."
+npm install
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Failed to install dependencies"
+    exit 1
+}
+Write-Success "Dependencies installed"
+
+Write-Host ""
+Write-Info "Building plugin..."
+npm run build
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Error "Build failed"
+    exit 1
+}
+Write-Success "Plugin built successfully"
+
+Write-Host ""
+Write-Info "Installing plugin to SiYuan..."
+
+$PLUGIN_DIR = "$SIYUAN_DIR\git-sync"
+
+# Create plugin directory
+if (-not (Test-Path $PLUGIN_DIR)) {
+    New-Item -ItemType Directory -Path $PLUGIN_DIR -Force | Out-Null
+}
+
+# Copy built files
+Copy-Item -Path "dist\*" -Destination $PLUGIN_DIR -Recurse -Force
+
+if ($LASTEXITCODE -eq 0 -or $?) {
+    Write-Success "Plugin installed to: $PLUGIN_DIR"
+} else {
+    Write-Error "Failed to copy plugin files"
+    exit 1
+}
+
+Write-Host ""
+Write-Host "======================================================" -ForegroundColor Cyan
+Write-Success "Installation Complete!"
+Write-Host "======================================================" -ForegroundColor Cyan
+Write-Host ""
+Write-Info "Next steps:"
+Write-Host "  1. Restart SiYuan"
+Write-Host "  2. Look for the ☁️ cloud icon in the top bar"
+Write-Host "  3. Click it to configure your GitHub settings"
+Write-Host ""
+Write-Info "Configuration needed:"
+Write-Host "  - GitHub Repository URL"
+Write-Host "  - GitHub Personal Access Token"
+Write-Host "  - Username and Email"
+Write-Host ""
+Write-Info "For detailed setup instructions, see:"
+Write-Host "  - README.md (full documentation)"
+Write-Host "  - QUICKSTART.md (5-minute guide)"
+Write-Host ""
+Write-Warning "Don't forget to create your GitHub token at:"
+Write-Host "  https://github.com/settings/tokens"
+Write-Host ""
+Write-Success "Happy syncing! 🚀"
+Write-Host ""
+
+# Pause to let user read
+Write-Host "Press any key to exit..."
+$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
