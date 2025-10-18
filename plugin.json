@@ -1,15 +1,15 @@
 {
     "name": "siyuan-git-sync",
-    "author": "Your Name",
-    "url": "https://github.com/yourusername/siyuan-git-sync",
+    "author": "Swastik",
+    "url": "https://github.com/mswastik/siyuan-git-sync",
     "version": "0.0.1",
     "minAppVersion": "3.0.0",
     "runtime": {
         "node": ">=18.0.0",
         "npm": ">=8.0.0"
     },
-    "backends": ["windows", "linux", "darwin", "docker"],
-    "frontends": ["desktop", "mobile", "browser-desktop", "browser-mobile"],
+    "backends": ["windows", "linux", "darwin", "docker","ios","android","harmony"],
+    "frontends": ["desktop", "mobile", "browser-desktop", "browser-mobile","desktop-window"],
     "displayName": {
         "en_US": "Git Sync",
         "zh_CN": "Git 同步"
@@ -22,6 +22,9 @@
         "en_US": "README.md",
         "zh_CN": "README.md"
     },
+    "funding": {
+    "custom": ["https://github.com/sponsors/mswastik"]
+  },
     "i18n": ["en_US", "zh_CN"],
     "key": "siyuan-git-sync",
     "icon": "iconGit",

@@ -1,16 +1,95 @@
 {
-    "gitSync": {
-        "gitSync": "Git Sync",
-        "gitSyncSettings": "Git Sync Settings",
-        "enableGitSync": "Enable Git Sync",
-        "repoPath": "Repository Path",
-        "autoCommit": "Auto Commit",
-        "commitMessage": "Commit Message",
-        "syncNow": "Sync Now",
-        "lastSync": "Last Sync",
-        "status": "Status",
-        "username": "Username",
-        "email": "Email",
-        "branch": "Branch"
+  "name": "Git Sync",
+  "description": "Sync your SiYuan notes with GitHub - Full two-way sync with push and pull support",
+  
+  "settings": {
+    "repoOwner": {
+      "title": "Repository Owner",
+      "description": "GitHub username or organization (e.g., 'octocat')"
+    },
+    "repoName": {
+      "title": "Repository Name",
+      "description": "Repository name (e.g., 'my-notes')"
+    },
+    "branch": {
+      "title": "Branch",
+      "description": "Git branch (default: main)"
+    },
+    "token": {
+      "title": "GitHub Token",
+      "description": "Personal Access Token with 'repo' permissions. Get it from: github.com/settings/tokens"
+    },
+    "authorName": {
+      "title": "Author Name",
+      "description": "Name for Git commits"
+    },
+    "authorEmail": {
+      "title": "Author Email",
+      "description": "Email for Git commits"
+    },
+    "autoSync": {
+      "title": "Enable Auto-Sync",
+      "description": "Automatically sync at specified intervals"
+    },
+    "syncInterval": {
+      "title": "Sync Interval (minutes)",
+      "description": "Minutes between automatic syncs (minimum 5)"
+    },
+    "testButton": {
+      "title": "Test Connection",
+      "description": "Test GitHub connection and verify settings",
+      "label": "🔍 Test Connection"
     }
+  },
+  
+  "menu": {
+    "settings": "⚙️ Settings",
+    "fullSync": "🔄 Full Sync",
+    "pull": "📥 Pull from GitHub",
+    "push": "📤 Push to GitHub",
+    "status": "📊 Status",
+    "testConnection": "🔍 Test Connection"
+  },
+  
+  "messages": {
+    "loaded": "✅ Git Sync Plugin Loaded",
+    "configSaved": "✅ Configuration saved",
+    "syncInProgress": "⏳ Sync already in progress",
+    "configureFirst": "⚠️ Please configure settings first",
+    "testingConnection": "🔍 Testing connection...",
+    "connectionSuccess": "✅ Connected to: {repo}",
+    "connectionFailed": "❌ Connection test failed",
+    "pushing": "📤 Pushing to GitHub...",
+    "pushComplete": "✅ Push complete\n📤 Uploaded: {uploaded}\n🔄 Updated: {updated}",
+    "pushCompleteWithErrors": "✅ Push complete\n📤 Uploaded: {uploaded}\n🔄 Updated: {updated}\n❌ Errors: {errors}",
+    "pushFailed": "❌ Push failed",
+    "pulling": "📥 Pulling from GitHub...",
+    "pullComplete": "✅ Pull complete\n📥 Downloaded: {created}",
+    "pullCompleteWithErrors": "✅ Pull complete\n📥 Downloaded: {created}\n❌ Errors: {errors}",
+    "pullFailed": "❌ Pull failed",
+    "fullSyncStart": "🔄 Starting full sync...",
+    "fullSyncComplete": "✅ Full sync completed",
+    "fullSyncFailed": "❌ Full sync failed",
+    "checkingStatus": "📊 Checking status...",
+    "statusFailed": "❌ Failed to get status",
+    "autoSyncStarted": "✅ Auto-sync enabled (every {interval} min)",
+    "noChanges": "No changes to commit"
+  },
+  
+  "errors": {
+    "networkError": "Network error - check your internet connection",
+    "authError": "Invalid token or authentication failed",
+    "forbiddenError": "Access forbidden - check token permissions",
+    "notFoundError": "Repository not found or no access",
+    "configError": "Configuration error"
+  },
+  
+  "status": {
+    "title": "📊 Status:",
+    "localNotebooks": "📚 Local notebooks: {count}",
+    "localFiles": "📄 Local files: {count}",
+    "githubFiles": "☁️ GitHub files: {count}",
+    "repository": "🔗 Repository: {repo}",
+    "branch": "🌿 Branch: {branch}"
+  }
 }

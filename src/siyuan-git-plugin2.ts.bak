@@ -1,0 +1,747 @@
+/**
+ * SiYuan Git Sync Plugin
+ * Syncs your workspace with GitHub using isomorphic-git
+ */
+
+import { Plugin, showMessage } from "siyuan";
+import * as git from "isomorphic-git";
+import http from "isomorphic-git/http/web";
+import { SettingUtils } from "./libs/setting-utils";
+
+const PLUGIN_NAME = "git-sync";
+const STORAGE_NAME = "git-sync-config";
+
+interface GitConfig {
+    repoUrl: string;
+    branch: string;
+    username: string;
+    token: string;
+    authorName: string;
+    authorEmail: string;
+    autoSync: boolean;
+    syncInterval: number;
+}
+
+// Simple file system wrapper for SiYuan's file operations
+class SiYuanFS {
+    private plugin: Plugin;
+    
+    constructor(plugin: Plugin) {
+        this.plugin = plugin;
+    }
+    
+    promises = {
+        readFile: async (filepath: string, options?: any) => {
+            try {
+                const content = await this.plugin.loadData(filepath);
+                if (options?.encoding === 'utf8') {
+                    return content || '';
+                }
+                return new TextEncoder().encode(content || '');
+            } catch (e) {
+                throw new Error(`ENOENT: ${filepath}`);
+            }
+        },
+        
+        writeFile: async (filepath: string, data: any) => {
+            const content = typeof data === 'string' ? data : new TextDecoder().decode(data);
+            await this.plugin.saveData(filepath, content);
+        },
+        
+        unlink: async (filepath: string) => {
+            // SiYuan doesn't have direct file deletion in plugin API
+            // We'll just write empty content as a workaround
+            await this.plugin.saveData(filepath, '');
+        },
+        
+        readdir: async (filepath: string) => {
+            // This is a limitation - SiYuan plugins don't have directory listing
+            // We'll return an empty array for now
+            return [];
+        },
+        
+        mkdir: async (filepath: string, options?: any) => {
+            // SiYuan handles directories automatically
+            return;
+        },
+        
+        rmdir: async (filepath: string) => {
+            // Not supported in SiYuan plugin API
+            return;
+        },
+        
+        stat: async (filepath: string) => {
+            try {
+                const content = await this.plugin.loadData(filepath);
+                return {
+                    isFile: () => true,
+                    isDirectory: () => false,
+                    isSymbolicLink: () => false,
+                };
+            } catch (e) {
+                throw new Error(`ENOENT: ${filepath}`);
+            }
+        },
+        
+        lstat: async (filepath: string) => {
+            return this.promises.stat(filepath);
+        },
+        
+        readlink: async (filepath: string) => {
+            throw new Error('Symbolic links not supported');
+        },
+        
+        symlink: async (target: string, filepath: string) => {
+            throw new Error('Symbolic links not supported');
+        },
+        
+        chmod: async (filepath: string, mode: number) => {
+            // Not applicable in SiYuan
+            return;
+        }
+    };
+}
+
+export default class GitSyncPlugin extends Plugin {
+    private config: GitConfig = {
+        repoUrl: "",
+        branch: "main",
+        username: "",
+        token: "",
+        authorName: "SiYuan User",
+        authorEmail: "user@siyuan.local",
+        autoSync: false,
+        syncInterval: 60
+    };
+    
+    private topBarElement: HTMLElement;
+    private syncIntervalId: number | null = null;
+    private isSyncing = false;
+    private fs: any;
+    private settingUtils: SettingUtils;
+    private gitDir: string = ".git-sync";
+
+    async onload() {
+        console.log("Loading Git Sync Plugin");
+        
+        // Initialize file system wrapper
+        this.fs = new SiYuanFS(this);
+        
+        // Initialize settings first
+        this.settingUtils = new SettingUtils({
+            plugin: this,
+            name: STORAGE_NAME
+        });
+        
+        // Register settings before loading
+        this.registerSettings();
+        
+        // Load config
+        await this.loadConfig();
+
+        // Add top bar icon
+        this.addTopBarIcon();
+
+        // Start auto-sync if enabled
+        if (this.config.autoSync && this.config.repoUrl) {
+            this.startAutoSync();
+        }
+
+        showMessage("Git Sync Plugin Loaded", 2000, "info");
+    }
+
+    onunload() {
+        console.log("Unloading Git Sync Plugin");
+        
+        if (this.syncIntervalId) {
+            clearInterval(this.syncIntervalId);
+            this.syncIntervalId = null;
+        }
+    }
+
+    onLayoutReady() {
+        console.log("Layout ready for Git Sync Plugin");
+        try {
+            this.settingUtils.load();
+        } catch (error) {
+            console.error("Error loading settings in onLayoutReady:", error);
+        }
+    }
+
+    private async loadConfig() {
+        try {
+            const savedConfig = await this.loadData("config.json");
+            if (savedConfig) {
+                this.config = { ...this.config, ...JSON.parse(savedConfig) };
+            }
+        } catch (e) {
+            console.error("Failed to parse config:", e);
+        }
+    }
+
+    private async saveConfig() {
+        await this.saveData("config.json", JSON.stringify(this.config, null, 2));
+        
+        if (this.config.autoSync && this.config.repoUrl) {
+            this.startAutoSync();
+        } else {
+            this.stopAutoSync();
+        }
+        
+        showMessage("Configuration saved", 2000, "info");
+    }
+
+    private addTopBarIcon() {
+        const iconElement = this.addTopBar({
+            icon: "iconCloud",
+            title: "Git Sync",
+            position: "right",
+            callback: () => {
+                this.addMenu();
+            }
+        });
+        this.topBarElement = iconElement;
+    }
+
+    private showProgress(message: string, progress?: number) {
+        let displayMessage = message;
+        if (progress !== undefined) {
+            displayMessage += ` (${Math.round(progress)}%)`;
+        }
+        showMessage(displayMessage, 3000, "info");
+    }
+
+    private handleError(operation: string, error: any) {
+        let errorMessage = `Failed to ${operation}`;
+        
+        if (error instanceof Error) {
+            errorMessage += `: ${error.message}`;
+            
+            if (error.message.includes("authentication") || error.message.includes("401")) {
+                errorMessage += "\n💡 Check your GitHub token and permissions";
+            } else if (error.message.includes("404") || error.message.includes("not found")) {
+                errorMessage += "\n💡 Check your repository URL";
+            } else if (error.message.includes("network") || error.message.includes("fetch")) {
+                errorMessage += "\n💡 Check your internet connection";
+            }
+        }
+        
+        console.error(`Git operation failed (${operation}):`, error);
+        showMessage(errorMessage, 6000, "error");
+    }
+
+    private async initializeGitRepo() {
+        try {
+            const dir = this.gitDir;
+            
+            try {
+                await this.fs.promises.stat(`${dir}/.git/config`);
+                return true;
+            } catch (e) {
+                showMessage("Initializing Git repository...", 2000, "info");
+                
+                await git.init({
+                    fs: this.fs,
+                    dir,
+                    defaultBranch: this.config.branch
+                });
+
+                if (this.config.repoUrl) {
+                    await git.addRemote({
+                        fs: this.fs,
+                        dir,
+                        remote: "origin",
+                        url: this.config.repoUrl
+                    });
+                }
+                
+                showMessage("Git repository initialized", 2000, "info");
+            }
+            
+            return true;
+        } catch (error) {
+            this.handleError("initialize Git repo", error);
+            return false;
+        }
+    }
+
+    private async testConnection() {
+        if (!this.config.repoUrl) {
+            showMessage("⚠️ Please configure repository URL first", 3000, "error");
+            return;
+        }
+
+        if (!this.config.token) {
+            showMessage("⚠️ Please configure GitHub token first", 3000, "error");
+            return;
+        }
+
+        showMessage("Testing connection...", 3000, "info");
+        
+        try {
+            await this.initializeGitRepo();
+            
+            const info = await git.getRemoteInfo({
+                http,
+                url: this.config.repoUrl,
+                onAuth: () => ({
+                    username: this.config.username || this.config.token,
+                    password: this.config.token
+                })
+            });
+            
+            showMessage("✅ Connection successful!", 3000, "info");
+        } catch (error) {
+            this.handleError("test connection", error);
+        }
+    }
+
+    private async pullFromGithub() {
+        if (!this.validateConfig()) return;
+        
+        if (this.isSyncing) {
+            showMessage("Sync already in progress", 2000, "info");
+            return;
+        }
+
+        this.isSyncing = true;
+        showMessage("📥 Pulling from GitHub...", 3000, "info");
+
+        try {
+            await this.initializeGitRepo();
+            const dir = this.gitDir;
+            
+            await git.fetch({
+                fs: this.fs,
+                http,
+                dir,
+                remote: "origin",
+                ref: this.config.branch,
+                singleBranch: true,
+                depth: 10,
+                onAuth: () => ({
+                    username: this.config.username || this.config.token,
+                    password: this.config.token
+                }),
+                onProgress: (progress) => {
+                    console.log("Fetch progress:", progress);
+                }
+            });
+
+            await git.merge({
+                fs: this.fs,
+                dir,
+                ours: this.config.branch,
+                theirs: `origin/${this.config.branch}`,
+                author: {
+                    name: this.config.authorName,
+                    email: this.config.authorEmail
+                }
+            });
+
+            showMessage("✅ Successfully pulled from GitHub", 3000, "info");
+        } catch (error) {
+            this.handleError("pull from GitHub", error);
+        } finally {
+            this.isSyncing = false;
+        }
+    }
+
+    private async pushToGithub() {
+        if (!this.validateConfig()) return;
+        
+        if (this.isSyncing) {
+            showMessage("Sync already in progress", 2000, "info");
+            return;
+        }
+
+        this.isSyncing = true;
+        showMessage("📤 Pushing to GitHub...", 3000, "info");
+
+        try {
+            await this.initializeGitRepo();
+            const dir = this.gitDir;
+            
+            await git.add({
+                fs: this.fs,
+                dir,
+                filepath: "."
+            });
+
+            const statusMatrix = await git.statusMatrix({
+                fs: this.fs,
+                dir
+            });
+
+            const hasChanges = statusMatrix.some(row => row[1] !== row[2] || row[2] !== row[3]);
+
+            if (hasChanges) {
+                await git.commit({
+                    fs: this.fs,
+                    dir,
+                    message: `Sync from SiYuan - ${new Date().toLocaleString()}`,
+                    author: {
+                        name: this.config.authorName,
+                        email: this.config.authorEmail
+                    }
+                });
+            } else {
+                showMessage("No changes to commit", 2000, "info");
+                return;
+            }
+
+            await git.push({
+                fs: this.fs,
+                http,
+                dir,
+                remote: "origin",
+                ref: this.config.branch,
+                onAuth: () => ({
+                    username: this.config.username || this.config.token,
+                    password: this.config.token
+                }),
+                onProgress: (progress) => {
+                    console.log("Push progress:", progress);
+                }
+            });
+
+            showMessage("✅ Successfully pushed to GitHub", 3000, "info");
+        } catch (error) {
+            this.handleError("push to GitHub", error);
+        } finally {
+            this.isSyncing = false;
+        }
+    }
+
+    private async showStatus() {
+        if (!this.validateConfig()) return;
+        
+        if (this.isSyncing) {
+            showMessage("Sync operation in progress", 2000, "info");
+            return;
+        }
+
+        showMessage("Checking status...", 2000, "info");
+
+        try {
+            await this.initializeGitRepo();
+            const dir = this.gitDir;
+            
+            const status = await git.statusMatrix({
+                fs: this.fs,
+                dir
+            });
+
+            const modified = status.filter(row => row[1] !== row[2]);
+            const staged = status.filter(row => row[2] !== row[3]);
+            
+            let statusMessage = "📊 Git Status:\n\n";
+            
+            if (modified.length > 0) {
+                statusMessage += `Modified: ${modified.length} file(s)\n`;
+            }
+            
+            if (staged.length > 0) {
+                statusMessage += `Staged: ${staged.length} file(s)\n`;
+            }
+            
+            if (modified.length === 0 && staged.length === 0) {
+                statusMessage += "✨ Working directory clean";
+            }
+            
+            showMessage(statusMessage, 5000, "info");
+        } catch (error) {
+            this.handleError("check status", error);
+        }
+    }
+
+    private validateConfig(): boolean {
+        if (!this.config.repoUrl) {
+            showMessage("⚠️ Please configure repository URL in settings", 3000, "error");
+            return false;
+        }
+        if (!this.config.token) {
+            showMessage("⚠️ Please configure GitHub token in settings", 3000, "error");
+            return false;
+        }
+        return true;
+    }
+
+    private startAutoSync() {
+        if (this.syncIntervalId) {
+            clearInterval(this.syncIntervalId);
+        }
+
+        const intervalMs = Math.max(this.config.syncInterval, 5) * 60 * 1000;
+
+        this.syncIntervalId = window.setInterval(async () => {
+            if (!this.isSyncing && this.validateConfig()) {
+                console.log("Auto-sync triggered");
+                await this.fullSync();
+            }
+        }, intervalMs);
+
+        console.log(`Auto-sync started: ${this.config.syncInterval} minutes`);
+    }
+
+    private stopAutoSync() {
+        if (this.syncIntervalId) {
+            clearInterval(this.syncIntervalId);
+            this.syncIntervalId = null;
+            console.log("Auto-sync stopped");
+        }
+    }
+
+    private registerSettings() {
+        this.settingUtils.addItem({
+            key: "repoUrl",
+            value: this.config.repoUrl,
+            type: "textinput",
+            title: "Repository URL",
+            description: "GitHub repository URL (e.g., https://github.com/username/repo.git)",
+            action: {
+                callback: async () => {
+                    const value = this.settingUtils.take("repoUrl");
+                    if (value !== undefined) {
+                        this.config.repoUrl = value;
+                        await this.saveConfig();
+                    }
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "branch",
+            value: this.config.branch,
+            type: "textinput",
+            title: "Branch",
+            description: "Git branch to sync with (default: main)",
+            action: {
+                callback: async () => {
+                    const value = this.settingUtils.take("branch");
+                    if (value !== undefined) {
+                        this.config.branch = value || "main";
+                        await this.saveConfig();
+                    }
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "username",
+            value: this.config.username,
+            type: "textinput",
+            title: "GitHub Username",
+            description: "Your GitHub username (optional, can use token only)",
+            action: {
+                callback: async () => {
+                    const value = this.settingUtils.take("username");
+                    if (value !== undefined) {
+                        this.config.username = value;
+                        await this.saveConfig();
+                    }
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "token",
+            value: this.config.token,
+            type: "textinput",
+            title: "Personal Access Token",
+            description: "GitHub Personal Access Token with repo permissions",
+            action: {
+                callback: async () => {
+                    const value = this.settingUtils.take("token");
+                    if (value !== undefined) {
+                        this.config.token = value;
+                        await this.saveConfig();
+                    }
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "authorName",
+            value: this.config.authorName,
+            type: "textinput",
+            title: "Author Name",
+            description: "Name for Git commits",
+            action: {
+                callback: async () => {
+                    const value = this.settingUtils.take("authorName");
+                    if (value !== undefined) {
+                        this.config.authorName = value;
+                        await this.saveConfig();
+                    }
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "authorEmail",
+            value: this.config.authorEmail,
+            type: "textinput",
+            title: "Author Email",
+            description: "Email for Git commits",
+            action: {
+                callback: async () => {
+                    const value = this.settingUtils.take("authorEmail");
+                    if (value !== undefined) {
+                        this.config.authorEmail = value;
+                        await this.saveConfig();
+                    }
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "autoSync",
+            value: this.config.autoSync,
+            type: "checkbox",
+            title: "Enable Auto-Sync",
+            description: "Automatically sync at specified intervals",
+            action: {
+                callback: async () => {
+                    const value = this.settingUtils.take("autoSync");
+                    if (value !== undefined) {
+                        this.config.autoSync = value;
+                        if (this.config.autoSync && this.validateConfig()) {
+                            this.startAutoSync();
+                        } else {
+                            this.stopAutoSync();
+                        }
+                        await this.saveConfig();
+                    }
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "syncInterval",
+            value: this.config.syncInterval,
+            type: "number",
+            title: "Sync Interval (minutes)",
+            description: "Minutes between automatic syncs (minimum 5)",
+            action: {
+                callback: async () => {
+                    const value = this.settingUtils.take("syncInterval");
+                    if (value !== undefined) {
+                        this.config.syncInterval = Math.max(5, value);
+                        if (this.config.autoSync) {
+                            this.startAutoSync();
+                        }
+                        await this.saveConfig();
+                    }
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "testButton",
+            value: "",
+            type: "button",
+            title: "Test Connection",
+            description: "Test connection to GitHub repository",
+            button: {
+                label: "Test Connection",
+                callback: () => {
+                    this.testConnection();
+                }
+            }
+        });
+
+        try {
+            this.settingUtils.load();
+        } catch (error) {
+            console.error("Error loading settings:", error);
+        }
+    }
+
+    private async fullSync() {
+        if (!this.validateConfig()) return;
+        
+        if (this.isSyncing) {
+            showMessage("Sync already in progress", 2000, "info");
+            return;
+        }
+
+        this.isSyncing = true;
+        showMessage("🔄 Starting full sync...", 3000, "info");
+
+        try {
+            await this.pullFromGithub();
+            await this.pushToGithub();
+            showMessage("✅ Full sync completed", 3000, "info");
+        } catch (error) {
+            this.handleError("perform full sync", error);
+        } finally {
+            this.isSyncing = false;
+        }
+    }
+
+    async openSetting() {
+        this.settingUtils.plugin.setting.open(STORAGE_NAME);
+    }
+    
+    private addMenu() {
+        const menu = new (window as any).siyuan.Menu("gitSyncMenu");
+        
+        menu.addItem({
+            icon: "iconSettings",
+            label: "Settings",
+            click: () => {
+                this.openSetting();
+            }
+        });
+        
+        menu.addSeparator();
+        
+        menu.addItem({
+            icon: "iconUpload",
+            label: "Push to GitHub",
+            click: async () => {
+                await this.pushToGithub();
+            }
+        });
+        
+        menu.addItem({
+            icon: "iconDownload",
+            label: "Pull from GitHub",
+            click: async () => {
+                await this.pullFromGithub();
+            }
+        });
+        
+        menu.addItem({
+            icon: "iconRefresh",
+            label: "Full Sync",
+            click: async () => {
+                await this.fullSync();
+            }
+        });
+        
+        menu.addSeparator();
+        
+        menu.addItem({
+            icon: "iconInfo",
+            label: "View Status",
+            click: async () => {
+                await this.showStatus();
+            }
+        });
+        
+        menu.addItem({
+            icon: "iconTest",
+            label: "Test Connection",
+            click: async () => {
+                await this.testConnection();
+            }
+        });
+        
+        menu.open({
+            x: this.topBarElement.getBoundingClientRect().left,
+            y: this.topBarElement.getBoundingClientRect().bottom
+        });
+    }
+}

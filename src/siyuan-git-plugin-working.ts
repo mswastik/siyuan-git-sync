@@ -98,12 +98,7 @@ export default class GitSyncPlugin extends Plugin {
         try {
             const savedConfig = await this.loadData(STORAGE_NAME);
             if (savedConfig) {
-                // Handle both string and object returns from loadData
-                const parsed = typeof savedConfig === 'string' 
-                    ? JSON.parse(savedConfig) 
-                    : savedConfig;
-                this.config = { ...this.config, ...parsed };
-                console.log("Config loaded successfully");
+                this.config = { ...this.config, ...JSON.parse(savedConfig) };
             }
         } catch (e) {
             console.error("Failed to load config:", e);

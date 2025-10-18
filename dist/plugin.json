@@ -8,8 +8,8 @@
         "node": ">=18.0.0",
         "npm": ">=8.0.0"
     },
-    "backends": ["windows", "linux", "darwin", "docker"],
-    "frontends": ["desktop", "mobile", "browser-desktop", "browser-mobile"],
+    "backends": ["windows", "linux", "darwin", "docker", "ios", "android", "harmony"],
+    "frontends": ["desktop", "mobile", "browser-desktop", "browser-mobile", "desktop-window"],
     "displayName": {
         "en_US": "Git Sync",
         "zh_CN": "Git 同步"

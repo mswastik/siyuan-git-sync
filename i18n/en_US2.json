@@ -1,0 +1,16 @@
+{
+    "gitSync": {
+        "gitSync": "Git Sync",
+        "gitSyncSettings": "Git Sync Settings",
+        "enableGitSync": "Enable Git Sync",
+        "repoPath": "Repository Path",
+        "autoCommit": "Auto Commit",
+        "commitMessage": "Commit Message",
+        "syncNow": "Sync Now",
+        "lastSync": "Last Sync",
+        "status": "Status",
+        "username": "Username",
+        "email": "Email",
+        "branch": "Branch"
+    }
+}

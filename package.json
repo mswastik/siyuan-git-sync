@@ -27,7 +27,6 @@
     "vite-plugin-static-copy": "^1.0.0"
   },
   "dependencies": {
-    "isomorphic-git": "^1.25.0",
-    "memfs": "^4.6.0"
+    "siyuan": "latest"
   }
 }

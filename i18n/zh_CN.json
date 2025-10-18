@@ -1,16 +1,95 @@
 {
-    "gitSync": {
-        "gitSync": "Git 同步",
-        "gitSyncSettings": "Git 同步设置",
-        "enableGitSync": "启用 Git 同步",
-        "repoPath": "仓库路径",
-        "autoCommit": "自动提交",
-        "commitMessage": "提交信息",
-        "syncNow": "立即同步",
-        "lastSync": "上次同步",
-        "status": "状态",
-        "username": "用户名",
-        "email": "邮箱",
-        "branch": "分支"
+  "name": "Git 同步",
+  "description": "将思源笔记同步到 GitHub - 支持完整的双向同步推送和拉取",
+  
+  "settings": {
+    "repoOwner": {
+      "title": "仓库所有者",
+      "description": "GitHub 用户名或组织名（例如：'octocat'）"
+    },
+    "repoName": {
+      "title": "仓库名称",
+      "description": "仓库名称（例如：'my-notes'）"
+    },
+    "branch": {
+      "title": "分支",
+      "description": "Git 分支（默认：main）"
+    },
+    "token": {
+      "title": "GitHub 令牌",
+      "description": "具有 'repo' 权限的个人访问令牌。从此处获取：github.com/settings/tokens"
+    },
+    "authorName": {
+      "title": "作者名称",
+      "description": "Git 提交使用的名称"
+    },
+    "authorEmail": {
+      "title": "作者邮箱",
+      "description": "Git 提交使用的邮箱"
+    },
+    "autoSync": {
+      "title": "启用自动同步",
+      "description": "按指定间隔自动同步"
+    },
+    "syncInterval": {
+      "title": "同步间隔（分钟）",
+      "description": "自动同步之间的分钟数（最小 5 分钟）"
+    },
+    "testButton": {
+      "title": "测试连接",
+      "description": "测试 GitHub 连接并验证设置",
+      "label": "🔍 测试连接"
     }
+  },
+  
+  "menu": {
+    "settings": "⚙️ 设置",
+    "fullSync": "🔄 完整同步",
+    "pull": "📥 从 GitHub 拉取",
+    "push": "📤 推送到 GitHub",
+    "status": "📊 状态",
+    "testConnection": "🔍 测试连接"
+  },
+  
+  "messages": {
+    "loaded": "✅ Git 同步插件已加载",
+    "configSaved": "✅ 配置已保存",
+    "syncInProgress": "⏳ 同步正在进行中",
+    "configureFirst": "⚠️ 请先配置设置",
+    "testingConnection": "🔍 正在测试连接...",
+    "connectionSuccess": "✅ 已连接到：{repo}",
+    "connectionFailed": "❌ 连接测试失败",
+    "pushing": "📤 正在推送到 GitHub...",
+    "pushComplete": "✅ 推送完成\n📤 已上传：{uploaded}\n🔄 已更新：{updated}",
+    "pushCompleteWithErrors": "✅ 推送完成\n📤 已上传：{uploaded}\n🔄 已更新：{updated}\n❌ 错误：{errors}",
+    "pushFailed": "❌ 推送失败",
+    "pulling": "📥 正在从 GitHub 拉取...",
+    "pullComplete": "✅ 拉取完成\n📥 已下载：{created}",
+    "pullCompleteWithErrors": "✅ 拉取完成\n📥 已下载：{created}\n❌ 错误：{errors}",
+    "pullFailed": "❌ 拉取失败",
+    "fullSyncStart": "🔄 开始完整同步...",
+    "fullSyncComplete": "✅ 完整同步完成",
+    "fullSyncFailed": "❌ 完整同步失败",
+    "checkingStatus": "📊 正在检查状态...",
+    "statusFailed": "❌ 获取状态失败",
+    "autoSyncStarted": "✅ 自动同步已启用（每 {interval} 分钟）",
+    "noChanges": "没有需要提交的更改"
+  },
+  
+  "errors": {
+    "networkError": "网络错误 - 请检查您的互联网连接",
+    "authError": "令牌无效或认证失败",
+    "forbiddenError": "访问被禁止 - 请检查令牌权限",
+    "notFoundError": "仓库未找到或无访问权限",
+    "configError": "配置错误"
+  },
+  
+  "status": {
+    "title": "📊 状态：",
+    "localNotebooks": "📚 本地笔记本：{count}",
+    "localFiles": "📄 本地文件：{count}",
+    "githubFiles": "☁️ GitHub 文件：{count}",
+    "repository": "🔗 仓库：{repo}",
+    "branch": "🌿 分支：{branch}"
+  }
 }
