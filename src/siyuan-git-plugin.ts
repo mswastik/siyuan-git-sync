@@ -876,9 +876,27 @@ export default class GitSyncPlugin extends Plugin {
         ? `Update ${path}`
         : `Create ${path}`;
 
+        // Always encode content as base64 for GitHub API
+        let encodedContent: string;
+        try {
+            // For text content, we need to properly encode it
+            encodedContent = btoa(unescape(encodeURIComponent(content)));
+        } catch (encodeError) {
+            // For binary content or content that can't be encoded as UTF-8, encode as binary
+            try {
+                // Convert string to binary data
+                const binaryData = new TextEncoder().encode(content);
+                // Convert binary data to base64
+                encodedContent = btoa(String.fromCharCode(...binaryData));
+            } catch (binaryError) {
+                // Last resort: try to encode as-is
+                encodedContent = btoa(content);
+            }
+        }
+
         const body: any = {
             message: `${message} - ${new Date().toLocaleString()}`,
-            content: btoa(unescape(encodeURIComponent(content))),
+            content: encodedContent,
             branch: this.config.branch,
             committer: {
                 name: this.config.authorName,
@@ -890,6 +908,7 @@ export default class GitSyncPlugin extends Plugin {
             }
         };
 
+        // Only include sha in the body if we have it (for updates)
         if (fileSha) {
             body.sha = fileSha;
         }
@@ -899,6 +918,90 @@ export default class GitSyncPlugin extends Plugin {
                                  "PUT",
                                  body
         );
+    }
+
+    private async deleteFileFromGitHub(path: string, sha?: string): Promise<void> {
+        // If we don't have the SHA, try to get it first
+        let fileSha = sha;
+        if (!fileSha) {
+            try {
+                const existingFile = await this.getFileContent(path);
+                fileSha = existingFile?.sha;
+            } catch (error) {
+                // If file doesn't exist on GitHub, nothing to delete
+                console.log(`File ${path} doesn't exist on GitHub, no need to delete`);
+                return;
+            }
+        }
+
+        if (!fileSha) {
+            console.log(`Cannot delete ${path} - no SHA provided and could not retrieve it`);
+            return;
+        }
+
+        const body: any = {
+            message: `Delete ${path} - ${new Date().toLocaleString()}`,
+            sha: fileSha,
+            branch: this.config.branch,
+            committer: {
+                name: this.config.authorName,
+                email: this.config.authorEmail
+            },
+            author: {
+                name: this.config.authorName,
+                email: this.config.authorEmail
+            }
+        };
+
+        await this.githubRequest(
+            `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}`,
+            "DELETE",
+            body
+        );
+    }
+
+    private async deleteLocalFile(path: string): Promise<boolean> {
+        try {
+            const response = await fetch("/api/file/removeFile", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ path })
+            });
+
+            const data = await response.json();
+            return data.code === 0;
+        } catch (error) {
+            console.error(`Failed to delete local file ${path}:`, error);
+            return false;
+        }
+    }
+
+    // Helper function to check if string is base64 encoded
+    private isBase64(str: string): boolean {
+        try {
+            return btoa(atob(str)) === str;
+        } catch (err) {
+            return false;
+        }
+    }
+
+    // Helper function to properly encode content as base64
+    private base64Encode(content: string): string {
+        try {
+            // Try regular base64 encoding for text content
+            return btoa(unescape(encodeURIComponent(content)));
+        } catch (error) {
+            // If that fails, handle as binary
+            try {
+                // Convert string to binary data
+                const binaryData = new TextEncoder().encode(content);
+                // Convert binary data to base64
+                return btoa(String.fromCharCode(...binaryData));
+            } catch (err) {
+                // Last resort: try to encode as-is
+                return btoa(content);
+            }
+        }
     }
 
     private async pushToGitHub() {
@@ -929,8 +1032,10 @@ export default class GitSyncPlugin extends Plugin {
             let uploaded = 0;
             let updated = 0;
             let skipped = 0;
+            let deleted = 0;
             let errors = 0;
 
+            // Process files: create, update, or delete
             for (const [path, content] of localFiles) {
                 try {
                     const githubFile = githubFiles.get(path);
@@ -953,9 +1058,29 @@ export default class GitSyncPlugin extends Plugin {
                 }
             }
 
+            // Delete files that exist on GitHub but no longer exist locally
+            for (const [path, githubFile] of githubFiles) {
+                if (!localFiles.has(path)) {
+                    // Check if this is a file type we're managing (e.g., .sy files, config files)
+                    if (path.endsWith('.sy') || 
+                        path.startsWith('config/') || 
+                        path.startsWith('plugins/') || 
+                        path.startsWith('templates/')) {
+                        try {
+                            await this.deleteFileFromGitHub(path, githubFile.sha);
+                            deleted++;
+                        } catch (error) {
+                            console.error(`Failed to delete ${path} from GitHub:`, error);
+                            errors++;
+                        }
+                    }
+                }
+            }
+
             const message = `✅ Push complete\n` +
             `📤 Uploaded: ${uploaded}\n` +
             `🔄 Updated: ${updated}\n` +
+            `🗑️ Deleted: ${deleted}\n` +
             `⏭️ Skipped: ${skipped}` +
             (errors > 0 ? `\n❌ Errors: ${errors}` : '');
 
@@ -983,75 +1108,241 @@ export default class GitSyncPlugin extends Plugin {
 
         try {
             const githubTree = await this.getGitHubTree();
+            const localFiles = await this.getLocalFiles(); // Get current local files to compare against
+            
             const notebooks = await this.listNotebooks();
             const notebookMap = new Map(notebooks.map((nb: any) => [nb.name, nb]));
 
             let created = 0;
             let updated = 0;
             let skipped = 0;
+            let deleted = 0;
             let errors = 0;
 
+            // Process files to download from GitHub
             for (const item of githubTree) {
-                if (item.type !== "blob" || !item.path.endsWith('.sy')) {
+                // Skip if not a blob
+                if (item.type !== "blob") {
                     continue;
                 }
 
                 try {
+                    // Parse the path to determine the type of file
                     const parts = item.path.split('/');
-                    const notebookName = parts[0];
-                    const relativePath = '/' + parts.slice(1).join('/');
-
-                    let notebook = notebookMap.get(notebookName);
-                    if (!notebook) {
-                        // Try to find if there's a notebook with matching ID in the name
-                        const matchingNotebook = notebooks.find((nb: any) => nb.name === notebookName || nb.id === notebookName);
-                        if (matchingNotebook) {
-                            notebook = matchingNotebook;
-                            notebookMap.set(notebookName, notebook);
-                        } else {
-                            // Create a new notebook if it doesn't exist
-                            const response = await fetch("/api/notebook/createNotebook", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ name: notebookName })
-                            });
-                            const data = await response.json();
-                            if (data.code === 0) {
-                                notebook = data.data.notebook;
+                    
+                    // Check if this is a notebook file (starts with "notebooks/")
+                    if (parts[0] === "notebooks") {
+                        // It's a notebook file: notebooks/{notebookName}/{filePath}
+                        const notebookName = parts[1];
+                        const relativePath = '/' + parts.slice(2).join('/');
+                        
+                        let notebook = notebookMap.get(notebookName);
+                        if (!notebook) {
+                            // Try to find if there's a notebook with matching ID in the name
+                            const matchingNotebook = notebooks.find((nb: any) => nb.name === notebookName || nb.id === notebookName);
+                            if (matchingNotebook) {
+                                notebook = matchingNotebook;
                                 notebookMap.set(notebookName, notebook);
                             } else {
-                                console.error(`Failed to create notebook ${notebookName}:`, data);
-                                errors++;
-                                continue;
+                                // Create a new notebook if it doesn't exist
+                                const response = await fetch("/api/notebook/createNotebook", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ name: notebookName })
+                                });
+                                const data = await response.json();
+                                if (data.code === 0) {
+                                    notebook = data.data.notebook;
+                                    notebookMap.set(notebookName, notebook);
+                                } else {
+                                    console.error(`Failed to create notebook ${notebookName}:`, data);
+                                    errors++;
+                                    continue;
+                                }
                             }
                         }
-                    }
 
-                    const localPath = `/data/${notebook.id}${relativePath}`;
-                    const remoteFile = await this.getFileContent(item.path);
+                        const localPath = `/data/${notebook.id}${relativePath}`;
+                        const remoteFile = await this.getFileContent(item.path);
 
-                    if (!remoteFile) {
-                        errors++;
-                        continue;
-                    }
-
-                    const localContent = await this.readLocalFile(localPath);
-
-                    if (localContent !== null && localContent === remoteFile.content) {
-                        skipped++;
-                        continue;
-                    }
-
-                    const success = await this.writeLocalFile(localPath, remoteFile.content);
-                    if (success) {
-                        if (localContent === null) {
-                            created++;
-                        } else {
-                            updated++;
+                        if (!remoteFile) {
+                            errors++;
+                            continue;
                         }
-                    } else {
-                        console.error(`Failed to write local file ${localPath}`);
-                        errors++;
+
+                        const localContent = await this.readLocalFile(localPath);
+
+                        if (localContent !== null && localContent === remoteFile.content) {
+                            skipped++;
+                            continue;
+                        }
+
+                        const success = await this.writeLocalFile(localPath, remoteFile.content);
+                        if (success) {
+                            if (localContent === null) {
+                                created++;
+                            } else {
+                                updated++;
+                            }
+                        } else {
+                            console.error(`Failed to write local file ${localPath}`);
+                            errors++;
+                        }
+                    }
+                    // Check if this is a config file (starts with "config/")
+                    else if (parts[0] === "config") {
+                        // It's a config file: config/{filePath}
+                        const relativePath = '/' + parts.slice(1).join('/');
+                        const localPath = `/data/storage${relativePath}`;
+                        
+                        const remoteFile = await this.getFileContent(item.path);
+
+                        if (!remoteFile) {
+                            errors++;
+                            continue;
+                        }
+
+                        const localContent = await this.readLocalFile(localPath);
+
+                        if (localContent !== null && localContent === remoteFile.content) {
+                            skipped++;
+                            continue;
+                        }
+
+                        const success = await this.writeLocalFile(localPath, remoteFile.content);
+                        if (success) {
+                            if (localContent === null) {
+                                created++;
+                            } else {
+                                updated++;
+                            }
+                        } else {
+                            console.error(`Failed to write local config file ${localPath}`);
+                            errors++;
+                        }
+                    }
+                    // Check if this is a plugin file (starts with "plugins/")
+                    else if (parts[0] === "plugins") {
+                        // It's a plugin file: plugins/{filePath}
+                        const relativePath = '/' + parts.slice(1).join('/');
+                        const localPath = `/data/plugins${relativePath}`;
+                        
+                        const remoteFile = await this.getFileContent(item.path);
+
+                        if (!remoteFile) {
+                            errors++;
+                            continue;
+                        }
+
+                        const localContent = await this.readLocalFile(localPath);
+
+                        if (localContent !== null && localContent === remoteFile.content) {
+                            skipped++;
+                            continue;
+                        }
+
+                        const success = await this.writeLocalFile(localPath, remoteFile.content);
+                        if (success) {
+                            if (localContent === null) {
+                                created++;
+                            } else {
+                                updated++;
+                            }
+                        } else {
+                            console.error(`Failed to write local plugin file ${localPath}`);
+                            errors++;
+                        }
+                    }
+                    // Check if this is a template file (starts with "templates/")
+                    else if (parts[0] === "templates") {
+                        // It's a template file: templates/{filePath}
+                        const relativePath = '/' + parts.slice(1).join('/');
+                        const localPath = `/data/templates${relativePath}`;
+                        
+                        const remoteFile = await this.getFileContent(item.path);
+
+                        if (!remoteFile) {
+                            errors++;
+                            continue;
+                        }
+
+                        const localContent = await this.readLocalFile(localPath);
+
+                        if (localContent !== null && localContent === remoteFile.content) {
+                            skipped++;
+                            continue;
+                        }
+
+                        const success = await this.writeLocalFile(localPath, remoteFile.content);
+                        if (success) {
+                            if (localContent === null) {
+                                created++;
+                            } else {
+                                updated++;
+                            }
+                        } else {
+                            console.error(`Failed to write local template file ${localPath}`);
+                            errors++;
+                        }
+                    }
+                    // Otherwise, it's a legacy notebook file in the root
+                    else {
+                        // Legacy format: {notebookName}/{filePath}
+                        const notebookName = parts[0];
+                        const relativePath = '/' + parts.slice(1).join('/');
+                        
+                        let notebook = notebookMap.get(notebookName);
+                        if (!notebook) {
+                            // Try to find if there's a notebook with matching ID in the name
+                            const matchingNotebook = notebooks.find((nb: any) => nb.name === notebookName || nb.id === notebookName);
+                            if (matchingNotebook) {
+                                notebook = matchingNotebook;
+                                notebookMap.set(notebookName, notebook);
+                            } else {
+                                // Create a new notebook if it doesn't exist
+                                const response = await fetch("/api/notebook/createNotebook", {
+                                    method: "POST",
+                                    headers: { "Content-Type": "application/json" },
+                                    body: JSON.stringify({ name: notebookName })
+                                });
+                                const data = await response.json();
+                                if (data.code === 0) {
+                                    notebook = data.data.notebook;
+                                    notebookMap.set(notebookName, notebook);
+                                } else {
+                                    console.error(`Failed to create notebook ${notebookName}:`, data);
+                                    errors++;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        const localPath = `/data/${notebook.id}${relativePath}`;
+                        const remoteFile = await this.getFileContent(item.path);
+
+                        if (!remoteFile) {
+                            errors++;
+                            continue;
+                        }
+
+                        const localContent = await this.readLocalFile(localPath);
+
+                        if (localContent !== null && localContent === remoteFile.content) {
+                            skipped++;
+                            continue;
+                        }
+
+                        const success = await this.writeLocalFile(localPath, remoteFile.content);
+                        if (success) {
+                            if (localContent === null) {
+                                created++;
+                            } else {
+                                updated++;
+                            }
+                        } else {
+                            console.error(`Failed to write local file ${localPath}`);
+                            errors++;
+                        }
                     }
                 } catch (error) {
                     console.error(`Failed to sync ${item.path}:`, error);
@@ -1059,16 +1350,85 @@ export default class GitSyncPlugin extends Plugin {
                 }
             }
 
+            // Delete local files that no longer exist on GitHub
+            for (const [path, content] of localFiles) {
+                // Check if this local file exists in the GitHub tree
+                const existsOnGitHub = githubTree.some(item => 
+                    item.type === "blob" && 
+                    item.path === path &&
+                    (path.endsWith('.sy') || path.startsWith('config/') || path.startsWith('plugins/') || path.startsWith('templates/'))
+                );
+                
+                if (!existsOnGitHub) {
+                    // File exists locally but not on GitHub, consider deleting it
+                    try {
+                        // Extract notebook name and path from local file structure
+                        const pathParts = path.split('/');
+                        if (path.startsWith('notebooks/')) {
+                            // It's a notebook file: notebooks/{notebookName}/{filePath}
+                            if (pathParts.length >= 3) {
+                                const notebookName = pathParts[1];
+                                const notebook = notebookMap.get(notebookName);
+                                if (notebook) {
+                                    const relativePath = '/' + pathParts.slice(2).join('/');
+                                    const localPath = `/data/${notebook.id}${relativePath}`;
+                                    if (await this.deleteLocalFile(localPath)) {
+                                        deleted++;
+                                    } else {
+                                        console.error(`Failed to delete local file ${localPath}`);
+                                        errors++;
+                                    }
+                                }
+                            }
+                        } else if (path.startsWith('config/')) {
+                            // It's a config file: config/{filePath}
+                            const relativePath = '/' + pathParts.slice(1).join('/');
+                            const localPath = `/data/storage${relativePath}`;
+                            if (await this.deleteLocalFile(localPath)) {
+                                deleted++;
+                            } else {
+                                console.error(`Failed to delete local config file ${localPath}`);
+                                errors++;
+                            }
+                        } else if (path.startsWith('plugins/')) {
+                            // It's a plugin file: plugins/{filePath}
+                            const relativePath = '/' + pathParts.slice(1).join('/');
+                            const localPath = `/data/plugins${relativePath}`;
+                            if (await this.deleteLocalFile(localPath)) {
+                                deleted++;
+                            } else {
+                                console.error(`Failed to delete local plugin file ${localPath}`);
+                                errors++;
+                            }
+                        } else if (path.startsWith('templates/')) {
+                            // It's a template file: templates/{filePath}
+                            const relativePath = '/' + pathParts.slice(1).join('/');
+                            const localPath = `/data/templates${relativePath}`;
+                            if (await this.deleteLocalFile(localPath)) {
+                                deleted++;
+                            } else {
+                                console.error(`Failed to delete local template file ${localPath}`);
+                                errors++;
+                            }
+                        }
+                    } catch (error) {
+                        console.error(`Error deleting local file ${path}:`, error);
+                        errors++;
+                    }
+                }
+            }
+
             const message = `✅ Pull complete\n` +
             `📥 Created: ${created}\n` +
             `🔄 Updated: ${updated}\n` +
+            `🗑️ Deleted: ${deleted}\n` +
             `⏭️ Skipped: ${skipped}` +
             (errors > 0 ? `\n❌ Errors: ${errors}` : '');
 
             showMessage(message, 5000, "info");
 
             // Reload workspace to show new files
-            if (created > 0 || updated > 0) {
+            if (created > 0 || updated > 0 || deleted > 0) {
                 await fetch("/api/filetree/refreshFiletree", { method: "POST" });
                 // Also try to refresh the document tree view
                 await fetch("/api/filetree/renameDoc", { 
@@ -1119,48 +1479,270 @@ export default class GitSyncPlugin extends Plugin {
     // Internal methods that don't set isSyncing flag
     private async pullFromGitHubInternal() {
         const githubTree = await this.getGitHubTree();
+        const localFiles = await this.getLocalFiles(); // Get local files to compare against
         const notebooks = await this.listNotebooks();
         const notebookMap = new Map(notebooks.map((nb: any) => [nb.name, nb]));
 
         let totalProcessed = 0;
 
+        // Process files to download from GitHub
         for (const item of githubTree) {
-            if (item.type !== "blob" || !item.path.endsWith('.sy')) continue;
-
-            const parts = item.path.split('/');
-            const notebookName = parts[0];
-            const relativePath = '/' + parts.slice(1).join('/');
-
-            let notebook = notebookMap.get(notebookName);
-            if (!notebook) {
-                const response = await fetch("/api/notebook/createNotebook", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name: notebookName })
-                });
-                const data = await response.json();
-                if (data.code === 0) {
-                    notebook = data.data.notebook;
-                    notebookMap.set(notebookName, notebook);
-                }
+            // Skip if not a blob
+            if (item.type !== "blob") {
+                continue;
             }
 
-            if (notebook) {
-                const localPath = `/data/${notebook.id}${relativePath}`;
-                const remoteFile = await this.getFileContent(item.path);
-
-                if (remoteFile) {
-                    const localContent = await this.readLocalFile(localPath);
-                    if (localContent !== remoteFile.content) {
-                        await this.writeLocalFile(localPath, remoteFile.content);
-                        totalProcessed++;
+            try {
+                // Parse the path to determine the type of file
+                const parts = item.path.split('/');
+                
+                // Check if this is a notebook file (starts with "notebooks/")
+                if (parts[0] === "notebooks") {
+                    // It's a notebook file: notebooks/{notebookName}/{filePath}
+                    const notebookName = parts[1];
+                    const relativePath = '/' + parts.slice(2).join('/');
+                    
+                    let notebook = notebookMap.get(notebookName);
+                    if (!notebook) {
+                        // Try to find if there's a notebook with matching ID in the name
+                        const matchingNotebook = notebooks.find((nb: any) => nb.name === notebookName || nb.id === notebookName);
+                        if (matchingNotebook) {
+                            notebook = matchingNotebook;
+                            notebookMap.set(notebookName, notebook);
+                        } else {
+                            // Create a new notebook if it doesn't exist
+                            const response = await fetch("/api/notebook/createNotebook", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ name: notebookName })
+                            });
+                            const data = await response.json();
+                            if (data.code === 0) {
+                                notebook = data.data.notebook;
+                                notebookMap.set(notebookName, notebook);
+                            } else {
+                                console.error(`Failed to create notebook ${notebookName}:`, data);
+                                continue;
+                            }
+                        }
                     }
+
+                    if (notebook) {
+                        const localPath = `/data/${notebook.id}${relativePath}`;
+                        const remoteFile = await this.getFileContent(item.path);
+
+                        if (!remoteFile) {
+                            continue;
+                        }
+
+                        const localContent = await this.readLocalFile(localPath);
+
+                        if (localContent !== remoteFile.content) {
+                            const success = await this.writeLocalFile(localPath, remoteFile.content);
+                            if (success) {
+                                totalProcessed++;
+                            } else {
+                                console.error(`Failed to write local file ${localPath}`);
+                            }
+                        }
+                    }
+                }
+                // Check if this is a config file (starts with "config/")
+                else if (parts[0] === "config") {
+                    // It's a config file: config/{filePath}
+                    const relativePath = '/' + parts.slice(1).join('/');
+                    const localPath = `/data/storage${relativePath}`;
+                    
+                    const remoteFile = await this.getFileContent(item.path);
+
+                    if (!remoteFile) {
+                        continue;
+                    }
+
+                    const localContent = await this.readLocalFile(localPath);
+
+                    if (localContent !== null && localContent !== remoteFile.content) {
+                        const success = await this.writeLocalFile(localPath, remoteFile.content);
+                        if (success) {
+                            totalProcessed++;
+                        } else {
+                            console.error(`Failed to write local config file ${localPath}`);
+                        }
+                    }
+                }
+                // Check if this is a plugin file (starts with "plugins/")
+                else if (parts[0] === "plugins") {
+                    // It's a plugin file: plugins/{filePath}
+                    const relativePath = '/' + parts.slice(1).join('/');
+                    const localPath = `/data/plugins${relativePath}`;
+                    
+                    const remoteFile = await this.getFileContent(item.path);
+
+                    if (!remoteFile) {
+                        continue;
+                    }
+
+                    const localContent = await this.readLocalFile(localPath);
+
+                    if (localContent !== null && localContent !== remoteFile.content) {
+                        const success = await this.writeLocalFile(localPath, remoteFile.content);
+                        if (success) {
+                            totalProcessed++;
+                        } else {
+                            console.error(`Failed to write local plugin file ${localPath}`);
+                        }
+                    }
+                }
+                // Check if this is a template file (starts with "templates/")
+                else if (parts[0] === "templates") {
+                    // It's a template file: templates/{filePath}
+                    const relativePath = '/' + parts.slice(1).join('/');
+                    const localPath = `/data/templates${relativePath}`;
+                    
+                    const remoteFile = await this.getFileContent(item.path);
+
+                    if (!remoteFile) {
+                        continue;
+                    }
+
+                    const localContent = await this.readLocalFile(localPath);
+
+                    if (localContent !== null && localContent !== remoteFile.content) {
+                        const success = await this.writeLocalFile(localPath, remoteFile.content);
+                        if (success) {
+                            totalProcessed++;
+                        } else {
+                            console.error(`Failed to write local template file ${localPath}`);
+                        }
+                    }
+                }
+                // Otherwise, it's a legacy notebook file in the root
+                else {
+                    // Legacy format: {notebookName}/{filePath}
+                    const notebookName = parts[0];
+                    const relativePath = '/' + parts.slice(1).join('/');
+                    
+                    let notebook = notebookMap.get(notebookName);
+                    if (!notebook) {
+                        // Try to find if there's a notebook with matching ID in the name
+                        const matchingNotebook = notebooks.find((nb: any) => nb.name === notebookName || nb.id === notebookName);
+                        if (matchingNotebook) {
+                            notebook = matchingNotebook;
+                            notebookMap.set(notebookName, notebook);
+                        } else {
+                            // Create a new notebook if it doesn't exist
+                            const response = await fetch("/api/notebook/createNotebook", {
+                                method: "POST",
+                                headers: { "Content-Type": "application/json" },
+                                body: JSON.stringify({ name: notebookName })
+                            });
+                            const data = await response.json();
+                            if (data.code === 0) {
+                                notebook = data.data.notebook;
+                                notebookMap.set(notebookName, notebook);
+                            } else {
+                                console.error(`Failed to create notebook ${notebookName}:`, data);
+                                continue;
+                            }
+                        }
+                    }
+
+                    if (notebook) {
+                        const localPath = `/data/${notebook.id}${relativePath}`;
+                        const remoteFile = await this.getFileContent(item.path);
+
+                        if (!remoteFile) {
+                            continue;
+                        }
+
+                        const localContent = await this.readLocalFile(localPath);
+
+                        if (localContent !== null && localContent !== remoteFile.content) {
+                            const success = await this.writeLocalFile(localPath, remoteFile.content);
+                            if (success) {
+                                totalProcessed++;
+                            } else {
+                                console.error(`Failed to write local file ${localPath}`);
+                            }
+                        }
+                    }
+                }
+            } catch (error) {
+                console.error(`Failed to sync ${item.path}:`, error);
+            }
+        }
+
+        // Delete local files that no longer exist on GitHub
+        for (const [path, content] of localFiles) {
+            // Check if this local file exists in the GitHub tree
+            const existsOnGitHub = githubTree.some(item => 
+                item.type === "blob" && 
+                item.path === path &&
+                (path.endsWith('.sy') || path.startsWith('config/') || path.startsWith('plugins/') || path.startsWith('templates/'))
+            );
+            
+            if (!existsOnGitHub) {
+                // File exists locally but not on GitHub, consider deleting it
+                try {
+                    // Extract notebook name and path from local file structure
+                    const pathParts = path.split('/');
+                    if (path.startsWith('notebooks/')) {
+                        // It's a notebook file: notebooks/{notebookName}/{filePath}
+                        if (pathParts.length >= 3) {
+                            const notebookName = pathParts[1];
+                            const notebook = notebookMap.get(notebookName);
+                            if (notebook) {
+                                const relativePath = '/' + pathParts.slice(2).join('/');
+                                const localPath = `/data/${notebook.id}${relativePath}`;
+                                if (await this.deleteLocalFile(localPath)) {
+                                    totalProcessed++;
+                                } else {
+                                    console.error(`Failed to delete local file ${localPath}`);
+                                }
+                            }
+                        }
+                    } else if (path.startsWith('config/')) {
+                        // It's a config file: config/{filePath}
+                        const relativePath = '/' + pathParts.slice(1).join('/');
+                        const localPath = `/data/storage${relativePath}`;
+                        if (await this.deleteLocalFile(localPath)) {
+                            totalProcessed++;
+                        } else {
+                            console.error(`Failed to delete local config file ${localPath}`);
+                        }
+                    } else if (path.startsWith('plugins/')) {
+                        // It's a plugin file: plugins/{filePath}
+                        const relativePath = '/' + pathParts.slice(1).join('/');
+                        const localPath = `/data/plugins${relativePath}`;
+                        if (await this.deleteLocalFile(localPath)) {
+                            totalProcessed++;
+                        } else {
+                            console.error(`Failed to delete local plugin file ${localPath}`);
+                        }
+                    } else if (path.startsWith('templates/')) {
+                        // It's a template file: templates/{filePath}
+                        const relativePath = '/' + pathParts.slice(1).join('/');
+                        const localPath = `/data/templates${relativePath}`;
+                        if (await this.deleteLocalFile(localPath)) {
+                            totalProcessed++;
+                        } else {
+                            console.error(`Failed to delete local template file ${localPath}`);
+                        }
+                    }
+                } catch (error) {
+                    console.error(`Error deleting local file ${path}:`, error);
                 }
             }
         }
 
         if (totalProcessed > 0) {
             await fetch("/api/filetree/refreshFiletree", { method: "POST" });
+            // Also try to refresh the document tree view
+            await fetch("/api/filetree/renameDoc", { 
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ notebook: "", path: "/" })
+            }).catch(() => {}); // Ignore errors from this optional refresh
         }
     }
 

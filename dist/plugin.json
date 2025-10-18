@@ -2,7 +2,7 @@
     "name": "siyuan-git-sync",
     "author": "Swastik",
     "url": "https://github.com/mswastik/siyuan-git-sync",
-    "version": "0.0.1",
+    "version": "1.0.0",
     "minAppVersion": "3.0.0",
     "runtime": {
         "node": ">=18.0.0",

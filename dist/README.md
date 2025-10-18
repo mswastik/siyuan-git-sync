@@ -1,6 +1,6 @@
 # SiYuan Git Sync Plugin
 
-A powerful plugin to sync your SiYuan notes with GitHub. Features full two-way synchronization with both push and pull support.
+A powerful plugin to sync your SiYuan notes with GitHub. Features full two-way synchronization with both push and pull support, plus enhanced folder structure and file deletion sync.
 
 ## ✨ Features
 
@@ -10,6 +10,8 @@ A powerful plugin to sync your SiYuan notes with GitHub. Features full two-way s
 - ⏰ **Auto-Sync** - Automatically sync at regular intervals
 - 🔍 **Test Connection** - Verify your GitHub settings before syncing
 - 📊 **Status View** - Check local and remote file counts
+- 🗑️ **File Deletion Sync** - Automatically delete files that no longer exist locally or on GitHub
+- 📁 **Enhanced Folder Structure** - Organized structure with notebooks, plugins, config, and templates folders
 - 🌐 **i18n Support** - English and Chinese (Simplified)
 
 ## 📦 Installation

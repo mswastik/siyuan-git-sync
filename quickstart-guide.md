@@ -36,14 +36,14 @@ Get up and running in **5 minutes**!
 
 **Option A: Pre-built (If available)**
 
-Download from releases: https://github.com/m.swastik/siyuan-plugin-git-sync/releases
+Download from releases: https://github.com/mswastik/siyuan-git-sync/releases
 
 **Option B: Build from source**
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/yourusername/siyuan-plugin-git-sync.git
-cd siyuan-plugin-git-sync
+git clone https://github.com/mswastik/siyuan-git-sync.git
+cd siyuan-git-sync
 
 # 2. Install & build (one command)
 npm install && npm run build
@@ -80,10 +80,10 @@ cp -r dist/* ~/.config/SiYuan/data/plugins/git-sync/
 3. Go to Settings or click the cloud icon again
 4. Fill in:
    ```
-   Repository URL: https://github.com/YOUR_USERNAME/siyuan-backup.git
+   Repository Owner: YOUR_USERNAME
+   Repository Name: siyuan-backup
    Branch: main
-   Username: YOUR_USERNAME
-   Token: ghp_YOUR_TOKEN_HERE
+   GitHub Token: ghp_YOUR_TOKEN_HERE
    Author Name: Your Name
    Author Email: you@example.com
    ```
@@ -94,7 +94,7 @@ cp -r dist/* ~/.config/SiYuan/data/plugins/git-sync/
 
 1. Click **☁️ cloud icon**
 2. Select **🔄 Full Sync**
-3. Wait for "✅ Successfully synced!" message
+3. Wait for "✅ Full sync completed" message
 4. Check GitHub - your files are there!
 
 ## ⚙️ Enable Auto-Sync (Optional)
@@ -223,6 +223,8 @@ After setup, you should:
 - ✅ Visual interface
 - ✅ Auto-sync
 - ✅ Status checking
+- ✅ File deletion sync
+- ✅ Enhanced folder structure
 
 ---
 
