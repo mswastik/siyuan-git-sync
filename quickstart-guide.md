@@ -36,7 +36,7 @@ Get up and running in **5 minutes**!
 
 **Option A: Pre-built (If available)**
 
-Download from releases: https://github.com/yourusername/siyuan-plugin-git-sync/releases
+Download from releases: https://github.com/m.swastik/siyuan-plugin-git-sync/releases
 
 **Option B: Build from source**
 
@@ -216,37 +216,6 @@ After setup, you should:
 **If all checked - you're done! 🎉**
 
 ---
-
-## 🔄 Alternative: Simple Backup Script
-
-If the plugin seems complex, here's a **simpler desktop-only script**:
-
-**Windows PowerShell:**
-```powershell
-# Save as: siyuan-backup.ps1
-cd "C:\Users\YOUR_NAME\AppData\Roaming\SiYuan\data\"
-git add .
-git commit -m "Backup $(Get-Date)"
-git push origin main
-```
-
-**Mac/Linux Bash:**
-```bash
-#!/bin/bash
-# Save as: siyuan-backup.sh
-cd ~/.config/SiYuan/data/
-git add .
-git commit -m "Backup $(date)"
-git push origin main
-```
-
-Run manually or schedule with Task Scheduler/cron.
-
-**Limitations:**
-- ❌ Desktop only (not Android)
-- ❌ Requires Git installed
-- ❌ Manual execution
-- ❌ No GUI
 
 **Plugin Advantages:**
 - ✅ Works on Android
