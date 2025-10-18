@@ -17,6 +17,9 @@ interface GitConfig {
     authorEmail: string;
     autoSync: boolean;
     syncInterval: number;
+    syncConfig: boolean;
+    syncPlugins: boolean;
+    syncTemplates: boolean;
 }
 
 interface GitHubTreeItem {
@@ -43,7 +46,10 @@ export default class GitSyncPlugin extends Plugin {
         authorName: "SiYuan User",
         authorEmail: "user@siyuan.local",
         autoSync: false,
-        syncInterval: 30
+        syncInterval: 30,
+        syncConfig: true,
+        syncPlugins: false,
+        syncTemplates: false
     };
 
     private topBarElement: HTMLElement;
@@ -280,7 +286,7 @@ export default class GitSyncPlugin extends Plugin {
                 console.log(`Read file response for ${path}:`, data);
 
                 // SiYuan API may return the content directly without the standard wrapper for certain file types
-                // If the response has ID, Spec, Type fields directly at the top level, it's the content
+                // If the response has ID, Spec, Type fields directly at the top level, it's the content (like .sy files)
                 if ('ID' in data && 'Spec' in data && 'Type' in data) {
                     // This is the actual file content (structured document), convert to JSON string
                     try {
@@ -296,9 +302,8 @@ export default class GitSyncPlugin extends Plugin {
                     // The real content is in the response, might be structured data
                     if (data.data !== undefined && data.data !== null) {
                         try {
-                            // If data.data exists and has SiYuan document structure, convert to JSON string
+                            // If data.data exists and has SiYuan document structure (ID, Spec, Type fields)
                             if (typeof data.data === 'object') {
-                                // Check if it has SiYuan document structure (ID, Spec, Type fields)
                                 if ('ID' in data.data && 'Spec' in data.data && 'Type' in data.data) {
                                     // This is a structured document object, convert to JSON string
                                     return JSON.stringify(data.data, null, 2);
@@ -437,12 +442,342 @@ export default class GitSyncPlugin extends Plugin {
         }
     }
 
+    private async listConfigFiles(): Promise<any[]> {
+        try {
+            console.log(`Listing config files in: /data/storage/`);
+            
+            const response = await fetch("/api/file/readDir", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    path: '/data/storage/'
+                })
+            });
+
+            if (!response.ok) {
+                console.error(`HTTP error listing config directory: ${response.status} ${response.statusText}`);
+                return [];
+            }
+
+            const data = await response.json();
+            console.log(`readDir response for config:`, data);
+
+            if (data.code !== 0) {
+                const errorMessage = data.msg || data.message || 'Unknown error';
+                console.error(`Failed to read config directory:`, errorMessage);
+                return [];
+            }
+
+            let allFiles: any[] = [];
+
+            for (const item of data.data || []) {
+                const itemPath = `/${item.name}`;
+                
+                if (item.isDir) {
+                    // Also check subdirectories in storage for configuration files
+                    const subFiles = await this.listConfigSubDir(item.name);
+                    allFiles = allFiles.concat(subFiles);
+                } else if (this.isConfigFile(item.name)) {
+                    allFiles.push({
+                        name: item.name,
+                        path: itemPath,
+                        fullPath: `/data/storage/${item.name}`
+                    });
+                }
+            }
+
+            return allFiles;
+        } catch (error) {
+            console.error(`Failed to list config files:`, error);
+            return [];
+        }
+    }
+
+    private async listConfigSubDir(dirName: string): Promise<any[]> {
+        try {
+            const dirPath = `/data/storage/${dirName}`;
+            console.log(`Listing config subdirectory: ${dirPath}`);
+
+            const response = await fetch("/api/file/readDir", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    path: dirPath
+                })
+            });
+
+            if (!response.ok) {
+                console.error(`HTTP error listing config subdirectory ${dirPath}: ${response.status} ${response.statusText}`);
+                return [];
+            }
+
+            const data = await response.json();
+            console.log(`readDir response for config subdirectory ${dirPath}:`, data);
+
+            if (data.code !== 0) {
+                const errorMessage = data.msg || data.message || 'Unknown error';
+                console.error(`Failed to read config subdirectory ${dirPath}:`, errorMessage);
+                return [];
+            }
+
+            let allFiles: any[] = [];
+
+            for (const item of data.data || []) {
+                const itemPath = `/${dirName}/${item.name}`;
+                
+                if (item.isDir) {
+                    // Recursively process subdirectories
+                    const subFiles = await this.listConfigSubDir(`${dirName}/${item.name}`);
+                    allFiles = allFiles.concat(subFiles);
+                } else if (this.isConfigFile(item.name)) {
+                    allFiles.push({
+                        name: item.name,
+                        path: itemPath,
+                        fullPath: `/data/storage${itemPath}`
+                    });
+                }
+            }
+
+            return allFiles;
+        } catch (error) {
+            console.error(`Failed to list config subdirectory ${dirName}:`, error);
+            return [];
+        }
+    }
+
+    private isConfigFile(filename: string): boolean {
+        // Include common SiYuan config file types
+        const configExtensions = ['.json', '.yaml', '.yml', '.conf', '.ini', '.txt'];
+        return configExtensions.some(ext => filename.endsWith(ext)) || 
+               filename === 'appearance' || 
+               filename.includes('config') || 
+               filename.includes('layout') || 
+               filename.includes('query');
+    }
+
+    private async listPlugins(): Promise<any[]> {
+        try {
+            console.log(`Listing plugins in: /data/plugins/`);
+            
+            const response = await fetch("/api/file/readDir", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    path: '/data/plugins/'
+                })
+            });
+
+            if (!response.ok) {
+                console.error(`HTTP error listing plugins directory: ${response.status} ${response.statusText}`);
+                return [];
+            }
+
+            const data = await response.json();
+            console.log(`readDir response for plugins:`, data);
+
+            if (data.code !== 0) {
+                const errorMessage = data.msg || data.message || 'Unknown error';
+                console.error(`Failed to read plugins directory:`, errorMessage);
+                return [];
+            }
+
+            let allFiles: any[] = [];
+
+            for (const item of data.data || []) {
+                const itemPath = `/${item.name}`;
+                
+                if (item.isDir) {
+                    // Recursively list all files in plugin directories
+                    const pluginFiles = await this.listPluginFiles(item.name);
+                    allFiles = allFiles.concat(pluginFiles);
+                } else {
+                    // Add plugin configuration files directly in plugins directory
+                    allFiles.push({
+                        name: item.name,
+                        path: itemPath,
+                        fullPath: `/data/plugins/${item.name}`
+                    });
+                }
+            }
+
+            return allFiles;
+        } catch (error) {
+            console.error(`Failed to list plugins:`, error);
+            return [];
+        }
+    }
+
+    private async listPluginFiles(pluginName: string): Promise<any[]> {
+        try {
+            const dirPath = `/data/plugins/${pluginName}`;
+            console.log(`Listing plugin files: ${dirPath}`);
+
+            const response = await fetch("/api/file/readDir", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    path: dirPath
+                })
+            });
+
+            if (!response.ok) {
+                console.error(`HTTP error listing plugin directory ${dirPath}: ${response.status} ${response.statusText}`);
+                return [];
+            }
+
+            const data = await response.json();
+            console.log(`readDir response for plugin ${pluginName}:`, data);
+
+            if (data.code !== 0) {
+                const errorMessage = data.msg || data.message || 'Unknown error';
+                console.error(`Failed to read plugin directory ${dirName}:`, errorMessage);
+                return [];
+            }
+
+            let allFiles: any[] = [];
+
+            for (const item of data.data || []) {
+                const itemPath = `/${pluginName}/${item.name}`;
+                
+                if (item.isDir) {
+                    // Recursively process subdirectories within the plugin
+                    const subFiles = await this.listPluginFiles(`${pluginName}/${item.name}`);
+                    allFiles = allFiles.concat(subFiles);
+                } else {
+                    allFiles.push({
+                        name: item.name,
+                        path: itemPath,
+                        fullPath: `/data/plugins${itemPath}`
+                    });
+                }
+            }
+
+            return allFiles;
+        } catch (error) {
+            console.error(`Failed to list plugin files for ${pluginName}:`, error);
+            return [];
+        }
+    }
+
+    private async listTemplates(): Promise<any[]> {
+        try {
+            console.log(`Listing templates in: /data/templates/`);
+            
+            const response = await fetch("/api/file/readDir", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    path: '/data/templates/'
+                })
+            });
+
+            if (!response.ok) {
+                console.error(`HTTP error listing templates directory: ${response.status} ${response.statusText}`);
+                return [];
+            }
+
+            const data = await response.json();
+            console.log(`readDir response for templates:`, data);
+
+            if (data.code !== 0) {
+                const errorMessage = data.msg || data.message || 'Unknown error';
+                console.error(`Failed to read templates directory:`, errorMessage);
+                return [];
+            }
+
+            let allFiles: any[] = [];
+
+            for (const item of data.data || []) {
+                const itemPath = `/${item.name}`;
+                
+                if (item.isDir) {
+                    // Recursively list all files in template directories
+                    const templateFiles = await this.listTemplateFiles(item.name);
+                    allFiles = allFiles.concat(templateFiles);
+                } else if (this.isTemplateFile(item.name)) {
+                    allFiles.push({
+                        name: item.name,
+                        path: itemPath,
+                        fullPath: `/data/templates/${item.name}`
+                    });
+                }
+            }
+
+            return allFiles;
+        } catch (error) {
+            console.error(`Failed to list templates:`, error);
+            return [];
+        }
+    }
+
+    private async listTemplateFiles(templateDirName: string): Promise<any[]> {
+        try {
+            const dirPath = `/data/templates/${templateDirName}`;
+            console.log(`Listing template files: ${dirPath}`);
+
+            const response = await fetch("/api/file/readDir", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    path: dirPath
+                })
+            });
+
+            if (!response.ok) {
+                console.error(`HTTP error listing template directory ${dirPath}: ${response.status} ${response.statusText}`);
+                return [];
+            }
+
+            const data = await response.json();
+            console.log(`readDir response for template ${templateDirName}:`, data);
+
+            if (data.code !== 0) {
+                const errorMessage = data.msg || data.message || 'Unknown error';
+                console.error(`Failed to read template directory ${dirName}:`, errorMessage);
+                return [];
+            }
+
+            let allFiles: any[] = [];
+
+            for (const item of data.data || []) {
+                const itemPath = `/${templateDirName}/${item.name}`;
+                
+                if (item.isDir) {
+                    // Recursively process subdirectories within the template
+                    const subFiles = await this.listTemplateFiles(`${templateDirName}/${item.name}`);
+                    allFiles = allFiles.concat(subFiles);
+                } else if (this.isTemplateFile(item.name)) {
+                    allFiles.push({
+                        name: item.name,
+                        path: itemPath,
+                        fullPath: `/data/templates${itemPath}`
+                    });
+                }
+            }
+
+            return allFiles;
+        } catch (error) {
+            console.error(`Failed to list template files for ${templateDirName}:`, error);
+            return [];
+        }
+    }
+
+    private isTemplateFile(filename: string): boolean {
+        // Include common template file types
+        return filename.endsWith('.md') || 
+               filename.endsWith('.tpl') || 
+               filename.endsWith('.template') ||
+               filename.endsWith('.sy') || 
+               filename.endsWith('.json');
+    }
+
     private async getLocalFiles(): Promise<Map<string, string>> {
         const fileMap = new Map<string, string>();
         const notebooks = await this.listNotebooks();
 
         console.log(`Found ${notebooks.length} notebooks`);
 
+        // Process notebooks and their .sy files
         for (const notebook of notebooks) {
             console.log(`Processing notebook: ${notebook.name} (${notebook.id})`);
             const files = await this.listFiles(notebook.id);
@@ -456,6 +791,54 @@ export default class GitSyncPlugin extends Plugin {
                     console.log(`  Added: ${relativePath}`);
                 } else {
                     console.error(`  Failed to read: ${file.fullPath}`);
+                }
+            }
+        }
+
+        // Process config files if enabled
+        if (this.config.syncConfig) {
+            const configFiles = await this.listConfigFiles();
+            console.log(`Found ${configFiles.length} config files`);
+            for (const file of configFiles) {
+                const content = await this.readLocalFile(file.fullPath);
+                if (content !== null) {
+                    const relativePath = `config${file.path}`;
+                    fileMap.set(relativePath, content);
+                    console.log(`  Added config: ${relativePath}`);
+                } else {
+                    console.error(`  Failed to read config: ${file.fullPath}`);
+                }
+            }
+        }
+
+        // Process plugins if enabled
+        if (this.config.syncPlugins) {
+            const pluginFiles = await this.listPlugins();
+            console.log(`Found ${pluginFiles.length} plugin files`);
+            for (const file of pluginFiles) {
+                const content = await this.readLocalFile(file.fullPath);
+                if (content !== null) {
+                    const relativePath = `plugins${file.path}`;
+                    fileMap.set(relativePath, content);
+                    console.log(`  Added plugin: ${relativePath}`);
+                } else {
+                    console.error(`  Failed to read plugin: ${file.fullPath}`);
+                }
+            }
+        }
+
+        // Process templates if enabled
+        if (this.config.syncTemplates) {
+            const templateFiles = await this.listTemplates();
+            console.log(`Found ${templateFiles.length} template files`);
+            for (const file of templateFiles) {
+                const content = await this.readLocalFile(file.fullPath);
+                if (content !== null) {
+                    const relativePath = `templates${file.path}`;
+                    fileMap.set(relativePath, content);
+                    console.log(`  Added template: ${relativePath}`);
+                } else {
+                    console.error(`  Failed to read template: ${file.fullPath}`);
                 }
             }
         }
@@ -973,6 +1356,57 @@ export default class GitSyncPlugin extends Plugin {
                                           }
                                       }
                                   }
+        });
+
+        this.settingUtils.addItem({
+            key: "syncConfig",
+            value: this.config.syncConfig,
+            type: "checkbox",
+            title: "Sync Config Files",
+            description: "Sync configuration files (default: true)",
+            action: {
+                callback: () => {
+                    const value = this.settingUtils.take("syncConfig");
+                    if (value !== undefined) {
+                        this.config.syncConfig = Boolean(value);
+                        this.saveConfig();
+                    }
+                }
+            }
+        });
+        
+        this.settingUtils.addItem({
+            key: "syncPlugins",
+            value: this.config.syncPlugins,
+            type: "checkbox",
+            title: "Sync Plugins",
+            description: "Sync installed plugins and their settings (default: false)",
+            action: {
+                callback: () => {
+                    const value = this.settingUtils.take("syncPlugins");
+                    if (value !== undefined) {
+                        this.config.syncPlugins = Boolean(value);
+                        this.saveConfig();
+                    }
+                }
+            }
+        });
+        
+        this.settingUtils.addItem({
+            key: "syncTemplates",
+            value: this.config.syncTemplates,
+            type: "checkbox",
+            title: "Sync Templates",
+            description: "Sync template files (default: false)",
+            action: {
+                callback: () => {
+                    const value = this.settingUtils.take("syncTemplates");
+                    if (value !== undefined) {
+                        this.config.syncTemplates = Boolean(value);
+                        this.saveConfig();
+                    }
+                }
+            }
         });
 
         this.settingUtils.addItem({
