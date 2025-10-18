@@ -1,6 +1,7 @@
 /**
  * SiYuan Git Sync Plugin
- * Syncs your workspace with GitHub - preserves file structure and syncs .sy files directly
+ * Syncs your workspace with GitHub using simple HTTP API approach
+ * This version avoids isomorphic-git to prevent Buffer polyfill issues
  */
 
 import { Plugin, showMessage, Menu } from "siyuan";
@@ -19,19 +20,32 @@ interface GitConfig {
     syncInterval: number;
 }
 
+interface GitHubFile {
+    name: string;
+    path: string;
+    sha: string;
+    size: number;
+    url: string;
+    html_url: string;
+    git_url: string;
+    download_url: string;
+    type: string;
+    content?: string;
+}
+
 interface GitHubTreeItem {
     path: string;
     mode: string;
     type: string;
     sha?: string;
-    size?: number;
-    url?: string;
+    content?: string;
 }
 
 interface LocalFile {
+    notebook: string;
     path: string;
     content: string;
-    isNew: boolean;
+    id: string;
 }
 
 export default class GitSyncPlugin extends Plugin {
@@ -50,6 +64,7 @@ export default class GitSyncPlugin extends Plugin {
     private syncIntervalId: number | null = null;
     private isSyncing = false;
     private settingUtils: SettingUtils;
+    private fileCache: Map<string, GitHubFile> = new Map();
 
     async onload() {
         console.log("Loading Git Sync Plugin");
@@ -83,6 +98,7 @@ export default class GitSyncPlugin extends Plugin {
         try {
             const savedConfig = await this.loadData(STORAGE_NAME);
             if (savedConfig) {
+                // Handle both string and object returns from loadData
                 const parsed = typeof savedConfig === 'string' 
                     ? JSON.parse(savedConfig) 
                     : savedConfig;
@@ -135,6 +151,7 @@ export default class GitSyncPlugin extends Plugin {
         showMessage(errorMsg, 6000, "error");
     }
 
+    // GitHub API Methods
     private async githubRequest(endpoint: string, method: string = "GET", body?: any): Promise<any> {
         const url = `https://api.github.com${endpoint}`;
         const headers: Record<string, string> = {
@@ -144,7 +161,11 @@ export default class GitSyncPlugin extends Plugin {
             "User-Agent": "SiYuan-Git-Sync-Plugin"
         };
 
-        const options: RequestInit = { method, headers };
+        const options: RequestInit = {
+            method,
+            headers
+        };
+
         if (body) {
             options.body = JSON.stringify(body);
         }
@@ -157,11 +178,11 @@ export default class GitSyncPlugin extends Plugin {
                 let errorMsg = `GitHub API Error (${response.status})`;
                 
                 if (response.status === 401) {
-                    errorMsg += ": Invalid token";
+                    errorMsg += ": Invalid token or authentication failed";
                 } else if (response.status === 403) {
-                    errorMsg += ": Access forbidden";
+                    errorMsg += ": Access forbidden - check token permissions";
                 } else if (response.status === 404) {
-                    errorMsg += ": Not found";
+                    errorMsg += ": Repository not found or no access";
                 } else {
                     errorMsg += `: ${errorText}`;
                 }
@@ -169,7 +190,10 @@ export default class GitSyncPlugin extends Plugin {
                 throw new Error(errorMsg);
             }
 
-            if (response.status === 204) return null;
+            if (response.status === 204) {
+                return null;
+            }
+
             return await response.json();
         } catch (error: any) {
             if (error.message.includes("Failed to fetch")) {
@@ -191,6 +215,7 @@ export default class GitSyncPlugin extends Plugin {
             const repo = await this.githubRequest(
                 `/repos/${this.config.repoOwner}/${this.config.repoName}`
             );
+            
             showMessage(`✅ Connected to: ${repo.full_name}`, 3000, "info");
         } catch (error) {
             this.showError("Connection test failed", error);
@@ -202,53 +227,38 @@ export default class GitSyncPlugin extends Plugin {
             let treeSha = sha;
             
             if (!treeSha) {
-                try {
-                    const ref = await this.githubRequest(
-                        `/repos/${this.config.repoOwner}/${this.config.repoName}/git/refs/heads/${this.config.branch}`
-                    );
-                    const commit = await this.githubRequest(ref.object.url.replace('https://api.github.com', ''));
-                    treeSha = commit.tree.sha;
-                } catch (error: any) {
-                    // Branch might not exist or have no commits yet
-                    if (error.message.includes("404")) {
-                        console.log("Branch not found or empty, returning empty tree");
-                        return [];
-                    }
-                    throw error;
-                }
+                // Get the latest commit SHA
+                const ref = await this.githubRequest(
+                    `/repos/${this.config.repoOwner}/${this.config.repoName}/git/refs/heads/${this.config.branch}`
+                );
+                const commit = await this.githubRequest(ref.object.url.replace('https://api.github.com', ''));
+                treeSha = commit.tree.sha;
             }
 
-            // Check if it's the empty tree SHA
-            if (treeSha === '4b825dc642cb6eb9a060e54bf8d69288fbee4904') {
-                console.log("Empty tree detected, returning empty array");
-                return [];
-            }
-
+            // Get the tree recursively
             const tree = await this.githubRequest(
                 `/repos/${this.config.repoOwner}/${this.config.repoName}/git/trees/${treeSha}?recursive=1`
             );
             
             return tree.tree || [];
         } catch (error: any) {
-            if (error.message.includes("404") || error.message.includes("Not Found")) {
-                console.log("Tree not found, returning empty array");
+            if (error.message.includes("404")) {
+                // Branch might not exist yet
                 return [];
             }
             throw error;
         }
     }
 
-    private async getFileContent(path: string): Promise<{ content: string; sha: string } | null> {
+    private async getFileContent(path: string): Promise<string | null> {
         try {
             const data = await this.githubRequest(
                 `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}?ref=${this.config.branch}`
             );
             
             if (data.type === "file" && data.content) {
-                return {
-                    content: atob(data.content.replace(/\n/g, '')),
-                    sha: data.sha
-                };
+                // Content is base64 encoded
+                return atob(data.content.replace(/\n/g, ''));
             }
         } catch (error: any) {
             if (error.message.includes("404")) {
@@ -259,148 +269,10 @@ export default class GitSyncPlugin extends Plugin {
         return null;
     }
 
-    private async readLocalFile(path: string): Promise<string | null> {
-        try {
-            const response = await fetch("/api/file/getFile", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path })
-            });
-            
-            if (!response.ok) {
-                console.error(`HTTP error reading ${path}: ${response.status}`);
-                return null;
-            }
-            
-            const data = await response.json();
-            console.log(`Read file response for ${path}:`, data);
-            
-            if (data.code === 0) {
-                // The data might be base64 encoded or plain text
-                if (data.data) {
-                    try {
-                        // Try to decode as base64 first
-                        return atob(data.data);
-                    } catch (e) {
-                        // If it fails, it might already be plain text
-                        return data.data;
-                    }
-                }
-            } else {
-                console.error(`API error reading ${path}: ${data.msg}`);
-            }
-        } catch (error) {
-            console.error(`Failed to read local file ${path}:`, error);
-        }
-        return null;
-    }
-
-    private async writeLocalFile(path: string, content: string): Promise<boolean> {
-        try {
-            const response = await fetch("/api/file/putFile", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path,
-                    file: btoa(content),
-                    isDir: false
-                })
-            });
-            const data = await response.json();
-            return data.code === 0;
-        } catch (error) {
-            console.error(`Failed to write local file ${path}:`, error);
-            return false;
-        }
-    }
-
-    private async listNotebooks(): Promise<any[]> {
-        try {
-            const response = await fetch("/api/notebook/lsNotebooks", {
-                method: "POST"
-            });
-            const data = await response.json();
-            return data.data?.notebooks || [];
-        } catch (error) {
-            console.error("Failed to list notebooks:", error);
-            return [];
-        }
-    }
-
-    private async listFiles(notebookId: string, path: string = "/"): Promise<any[]> {
-        try {
-            const dirPath = `/data/${notebookId}${path}`;
-            console.log(`Listing files in: ${dirPath}`);
-            
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: dirPath
-                })
-            });
-            
-            const data = await response.json();
-            console.log(`readDir response for ${dirPath}:`, data);
-            
-            if (data.code !== 0) {
-                console.error(`Failed to read directory ${dirPath}:`, data.msg);
-                return [];
-            }
-            
-            let allFiles: any[] = [];
-            
-            for (const item of data.data || []) {
-                const itemPath = path === "/" ? `/${item.name}` : `${path}/${item.name}`;
-                
-                if (item.isDir) {
-                    const subFiles = await this.listFiles(notebookId, itemPath);
-                    allFiles = allFiles.concat(subFiles);
-                } else if (item.name.endsWith('.sy')) {
-                    allFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `/data/${notebookId}${itemPath}`
-                    });
-                }
-            }
-            
-            return allFiles;
-        } catch (error) {
-            console.error(`Failed to list files in ${notebookId}${path}:`, error);
-            return [];
-        }
-    }
-
-    private async getLocalFiles(): Promise<Map<string, string>> {
-        const fileMap = new Map<string, string>();
-        const notebooks = await this.listNotebooks();
-        
-        console.log(`Found ${notebooks.length} notebooks`);
-        
-        for (const notebook of notebooks) {
-            console.log(`Processing notebook: ${notebook.name} (${notebook.id})`);
-            const files = await this.listFiles(notebook.id);
-            console.log(`  Found ${files.length} .sy files`);
-            
-            for (const file of files) {
-                const content = await this.readLocalFile(file.fullPath);
-                if (content !== null) {
-                    const relativePath = `${notebook.name}${file.path}`;
-                    fileMap.set(relativePath, content);
-                    console.log(`  Added: ${relativePath}`);
-                }
-            }
-        }
-        
-        console.log(`Total files to sync: ${fileMap.size}`);
-        return fileMap;
-    }
-
     private async createOrUpdateFile(path: string, content: string, sha?: string): Promise<void> {
         const message = sha 
-            ? `Update ${path}`
-            : `Create ${path}`;
+            ? `Update ${path} from SiYuan`
+            : `Create ${path} from SiYuan`;
         
         const body: any = {
             message: `${message} - ${new Date().toLocaleString()}`,
@@ -427,6 +299,138 @@ export default class GitSyncPlugin extends Plugin {
         );
     }
 
+    private async deleteFile(path: string, sha: string): Promise<void> {
+        const body = {
+            message: `Delete ${path} from SiYuan - ${new Date().toLocaleString()}`,
+            sha: sha,
+            branch: this.config.branch,
+            committer: {
+                name: this.config.authorName,
+                email: this.config.authorEmail
+            }
+        };
+
+        await this.githubRequest(
+            `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}`,
+            "DELETE",
+            body
+        );
+    }
+
+    // SiYuan API Methods
+    private async listNotebooks(): Promise<any[]> {
+        try {
+            const response = await fetch("/api/notebook/lsNotebooks", {
+                method: "POST"
+            });
+            const data = await response.json();
+            return data.data?.notebooks || [];
+        } catch (error) {
+            console.error("Failed to list notebooks:", error);
+            return [];
+        }
+    }
+
+    private async listDocsByPath(notebookId: string, path: string): Promise<any[]> {
+        try {
+            const response = await fetch("/api/filetree/listDocsByPath", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ notebook: notebookId, path })
+            });
+            const data = await response.json();
+            
+            const files = data.data?.files || [];
+            let allFiles = [...files];
+            
+            // Recursively get files from subdirectories
+            for (const file of files) {
+                if (file.subFileCount > 0) {
+                    const subFiles = await this.listDocsByPath(notebookId, file.path);
+                    allFiles = allFiles.concat(subFiles);
+                }
+            }
+            
+            return allFiles;
+        } catch (error) {
+            console.error("Failed to list docs:", error);
+            return [];
+        }
+    }
+
+    private async exportMarkdown(docId: string): Promise<string> {
+        try {
+            const response = await fetch("/api/export/exportMdContent", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id: docId })
+            });
+            const data = await response.json();
+            return data.data?.content || "";
+        } catch (error) {
+            console.error("Failed to export markdown:", error);
+            return "";
+        }
+    }
+
+    private async createNotebook(name: string): Promise<any> {
+        try {
+            const response = await fetch("/api/notebook/createNotebook", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name })
+            });
+            const data = await response.json();
+            return data.data?.notebook;
+        } catch (error) {
+            console.error("Failed to create notebook:", error);
+            return null;
+        }
+    }
+
+    private async createDocWithMd(notebookId: string, path: string, markdown: string): Promise<any> {
+        try {
+            const response = await fetch("/api/filetree/createDocWithMd", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    notebook: notebookId,
+                    path,
+                    markdown
+                })
+            });
+            return await response.json();
+        } catch (error) {
+            console.error("Failed to create document:", error);
+            return null;
+        }
+    }
+
+    private async getLocalFiles(): Promise<LocalFile[]> {
+        const localFiles: LocalFile[] = [];
+        const notebooks = await this.listNotebooks();
+        
+        for (const notebook of notebooks) {
+            const files = await this.listDocsByPath(notebook.id, "/");
+            
+            for (const file of files) {
+                if (file.path && file.path.endsWith(".sy")) {
+                    const content = await this.exportMarkdown(file.id);
+                    const relativePath = file.path.replace(/^\//, '').replace(/\.sy$/, '.md');
+                    
+                    localFiles.push({
+                        notebook: notebook.name,
+                        path: `${notebook.name}/${relativePath}`,
+                        content,
+                        id: file.id
+                    });
+                }
+            }
+        }
+        
+        return localFiles;
+    }
+
     private async pushToGitHub() {
         if (!this.isConfigValid()) {
             showMessage("⚠️ Please configure settings first", 3000, "error");
@@ -445,6 +449,7 @@ export default class GitSyncPlugin extends Plugin {
             const localFiles = await this.getLocalFiles();
             const githubTree = await this.getGitHubTree();
             
+            // Build a map of GitHub files
             const githubFiles = new Map<string, GitHubTreeItem>();
             for (const item of githubTree) {
                 if (item.type === "blob") {
@@ -454,35 +459,47 @@ export default class GitSyncPlugin extends Plugin {
 
             let uploaded = 0;
             let updated = 0;
-            let skipped = 0;
             let errors = 0;
 
-            for (const [path, content] of localFiles) {
+            // Upload/update local files
+            for (const localFile of localFiles) {
                 try {
-                    const githubFile = githubFiles.get(path);
+                    const githubFile = githubFiles.get(localFile.path);
                     
                     if (githubFile) {
-                        const remoteFile = await this.getFileContent(path);
-                        if (remoteFile && remoteFile.content === content) {
-                            skipped++;
-                            continue;
+                        // File exists, check if we need to update
+                        const existingContent = await this.getFileContent(localFile.path);
+                        if (existingContent !== localFile.content) {
+                            await this.createOrUpdateFile(localFile.path, localFile.content, githubFile.sha);
+                            updated++;
                         }
-                        await this.createOrUpdateFile(path, content, remoteFile?.sha);
-                        updated++;
                     } else {
-                        await this.createOrUpdateFile(path, content);
+                        // New file
+                        await this.createOrUpdateFile(localFile.path, localFile.content);
                         uploaded++;
                     }
+                    
+                    // Remove from map so we can detect deleted files
+                    githubFiles.delete(localFile.path);
                 } catch (error) {
-                    console.error(`Failed to sync ${path}:`, error);
+                    console.error(`Failed to sync ${localFile.path}:`, error);
                     errors++;
                 }
             }
 
+            // Delete files that exist on GitHub but not locally
+            // (commented out for safety - enable if you want auto-delete)
+            // for (const [path, file] of githubFiles) {
+            //     try {
+            //         await this.deleteFile(path, file.sha!);
+            //     } catch (error) {
+            //         console.error(`Failed to delete ${path}:`, error);
+            //     }
+            // }
+
             const message = `✅ Push complete\n` +
                 `📤 Uploaded: ${uploaded}\n` +
-                `🔄 Updated: ${updated}\n` +
-                `⏭️ Skipped: ${skipped}` +
+                `🔄 Updated: ${updated}` +
                 (errors > 0 ? `\n❌ Errors: ${errors}` : '');
             
             showMessage(message, 5000, "info");
@@ -514,58 +531,45 @@ export default class GitSyncPlugin extends Plugin {
 
             let created = 0;
             let updated = 0;
-            let skipped = 0;
             let errors = 0;
 
+            // Process each file from GitHub
             for (const item of githubTree) {
-                if (item.type !== "blob" || !item.path.endsWith('.sy')) {
+                if (item.type !== "blob" || !item.path.endsWith('.md')) {
                     continue;
                 }
 
                 try {
+                    // Parse path: NotebookName/path/to/file.md
                     const parts = item.path.split('/');
                     const notebookName = parts[0];
-                    const relativePath = '/' + parts.slice(1).join('/');
+                    const filePath = '/' + parts.slice(1).join('/').replace(/\.md$/, '');
 
+                    // Ensure notebook exists
                     let notebook = notebookMap.get(notebookName);
                     if (!notebook) {
-                        const response = await fetch("/api/notebook/createNotebook", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ name: notebookName })
-                        });
-                        const data = await response.json();
-                        if (data.code === 0) {
-                            notebook = data.data.notebook;
+                        notebook = await this.createNotebook(notebookName);
+                        if (notebook) {
                             notebookMap.set(notebookName, notebook);
                         } else {
+                            console.error(`Failed to create notebook: ${notebookName}`);
                             errors++;
                             continue;
                         }
                     }
 
-                    const localPath = `/data/${notebook.id}${relativePath}`;
-                    const remoteFile = await this.getFileContent(item.path);
-                    
-                    if (!remoteFile) {
+                    // Get file content from GitHub
+                    const content = await this.getFileContent(item.path);
+                    if (content === null) {
+                        console.error(`Failed to get content for: ${item.path}`);
                         errors++;
                         continue;
                     }
 
-                    const localContent = await this.readLocalFile(localPath);
-                    
-                    if (localContent === remoteFile.content) {
-                        skipped++;
-                        continue;
-                    }
-
-                    const success = await this.writeLocalFile(localPath, remoteFile.content);
-                    if (success) {
-                        if (localContent === null) {
-                            created++;
-                        } else {
-                            updated++;
-                        }
+                    // Create/update document in SiYuan
+                    const result = await this.createDocWithMd(notebook.id, filePath, content);
+                    if (result?.code === 0) {
+                        created++;
                     } else {
                         errors++;
                     }
@@ -576,17 +580,10 @@ export default class GitSyncPlugin extends Plugin {
             }
 
             const message = `✅ Pull complete\n` +
-                `📥 Created: ${created}\n` +
-                `🔄 Updated: ${updated}\n` +
-                `⏭️ Skipped: ${skipped}` +
+                `📥 Downloaded: ${created}` +
                 (errors > 0 ? `\n❌ Errors: ${errors}` : '');
             
             showMessage(message, 5000, "info");
-            
-            // Reload workspace to show new files
-            if (created > 0 || updated > 0) {
-                await fetch("/api/filetree/refreshFiletree", { method: "POST" });
-            }
         } catch (error) {
             this.showError("Pull failed", error);
         } finally {
@@ -606,100 +603,16 @@ export default class GitSyncPlugin extends Plugin {
         }
 
         showMessage("🔄 Starting full sync...", 3000, "info");
-        this.isSyncing = true;
 
         try {
-            // Pull first to get remote changes
-            await this.pullFromGitHubInternal();
-            
-            // Small delay to ensure files are written
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            
-            // Then push local changes
-            await this.pushToGitHubInternal();
-            
+            this.isSyncing = true;
+            await this.pullFromGitHub();
+            await this.pushToGitHub();
             showMessage("✅ Full sync completed", 3000, "info");
         } catch (error) {
             this.showError("Full sync failed", error);
         } finally {
             this.isSyncing = false;
-        }
-    }
-
-    // Internal methods that don't set isSyncing flag
-    private async pullFromGitHubInternal() {
-        const githubTree = await this.getGitHubTree();
-        const notebooks = await this.listNotebooks();
-        const notebookMap = new Map(notebooks.map((nb: any) => [nb.name, nb]));
-
-        let totalProcessed = 0;
-
-        for (const item of githubTree) {
-            if (item.type !== "blob" || !item.path.endsWith('.sy')) continue;
-
-            const parts = item.path.split('/');
-            const notebookName = parts[0];
-            const relativePath = '/' + parts.slice(1).join('/');
-
-            let notebook = notebookMap.get(notebookName);
-            if (!notebook) {
-                const response = await fetch("/api/notebook/createNotebook", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ name: notebookName })
-                });
-                const data = await response.json();
-                if (data.code === 0) {
-                    notebook = data.data.notebook;
-                    notebookMap.set(notebookName, notebook);
-                }
-            }
-
-            if (notebook) {
-                const localPath = `/data/${notebook.id}${relativePath}`;
-                const remoteFile = await this.getFileContent(item.path);
-                
-                if (remoteFile) {
-                    const localContent = await this.readLocalFile(localPath);
-                    if (localContent !== remoteFile.content) {
-                        await this.writeLocalFile(localPath, remoteFile.content);
-                        totalProcessed++;
-                    }
-                }
-            }
-        }
-
-        if (totalProcessed > 0) {
-            await fetch("/api/filetree/refreshFiletree", { method: "POST" });
-        }
-    }
-
-    private async pushToGitHubInternal() {
-        const localFiles = await this.getLocalFiles();
-        const githubTree = await this.getGitHubTree();
-        
-        const githubFiles = new Map<string, GitHubTreeItem>();
-        for (const item of githubTree) {
-            if (item.type === "blob") {
-                githubFiles.set(item.path, item);
-            }
-        }
-
-        let totalProcessed = 0;
-
-        for (const [path, content] of localFiles) {
-            const githubFile = githubFiles.get(path);
-            
-            if (githubFile) {
-                const remoteFile = await this.getFileContent(path);
-                if (!remoteFile || remoteFile.content !== content) {
-                    await this.createOrUpdateFile(path, content, remoteFile?.sha);
-                    totalProcessed++;
-                }
-            } else {
-                await this.createOrUpdateFile(path, content);
-                totalProcessed++;
-            }
         }
     }
 
@@ -714,16 +627,16 @@ export default class GitSyncPlugin extends Plugin {
         try {
             const localFiles = await this.getLocalFiles();
             const githubTree = await this.getGitHubTree();
-            const githubSyFiles = githubTree.filter(item => 
-                item.type === "blob" && item.path.endsWith('.sy')
+            const githubMdFiles = githubTree.filter(item => 
+                item.type === "blob" && item.path.endsWith('.md')
             );
 
             const notebooks = await this.listNotebooks();
             
             const statusMsg = `📊 Status:\n\n` +
                 `📚 Local notebooks: ${notebooks.length}\n` +
-                `📄 Local files: ${localFiles.size}\n` +
-                `☁️ GitHub files: ${githubSyFiles.length}\n` +
+                `📄 Local files: ${localFiles.length}\n` +
+                `☁️ GitHub files: ${githubMdFiles.length}\n` +
                 `🔗 Repository: ${this.config.repoOwner}/${this.config.repoName}\n` +
                 `🌿 Branch: ${this.config.branch}`;
 

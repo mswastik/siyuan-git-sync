@@ -364,7 +364,6 @@ class GitSyncPlugin extends siyuan.Plugin {
     };
     this.syncIntervalId = null;
     this.isSyncing = false;
-    this.fileCache = /* @__PURE__ */ new Map();
   }
   async onload() {
     console.log("Loading Git Sync Plugin");
@@ -430,7 +429,6 @@ ${error.message}`;
     }
     siyuan.showMessage(errorMsg, 6e3, "error");
   }
-  // GitHub API Methods
   async githubRequest(endpoint, method = "GET", body) {
     const url = `https://api.github.com${endpoint}`;
     const headers = {
@@ -439,10 +437,7 @@ ${error.message}`;
       "Content-Type": "application/json",
       "User-Agent": "SiYuan-Git-Sync-Plugin"
     };
-    const options = {
-      method,
-      headers
-    };
+    const options = { method, headers };
     if (body) {
       options.body = JSON.stringify(body);
     }
@@ -452,19 +447,17 @@ ${error.message}`;
         const errorText = await response.text();
         let errorMsg = `GitHub API Error (${response.status})`;
         if (response.status === 401) {
-          errorMsg += ": Invalid token or authentication failed";
+          errorMsg += ": Invalid token";
         } else if (response.status === 403) {
-          errorMsg += ": Access forbidden - check token permissions";
+          errorMsg += ": Access forbidden";
         } else if (response.status === 404) {
-          errorMsg += ": Repository not found or no access";
+          errorMsg += ": Not found";
         } else {
           errorMsg += `: ${errorText}`;
         }
         throw new Error(errorMsg);
       }
-      if (response.status === 204) {
-        return null;
-      }
+      if (response.status === 204) return null;
       return await response.json();
     } catch (error) {
       if (error.message.includes("Failed to fetch")) {
@@ -492,18 +485,31 @@ ${error.message}`;
     try {
       let treeSha = sha;
       if (!treeSha) {
-        const ref = await this.githubRequest(
-          `/repos/${this.config.repoOwner}/${this.config.repoName}/git/refs/heads/${this.config.branch}`
-        );
-        const commit = await this.githubRequest(ref.object.url.replace("https://api.github.com", ""));
-        treeSha = commit.tree.sha;
+        try {
+          const ref = await this.githubRequest(
+            `/repos/${this.config.repoOwner}/${this.config.repoName}/git/refs/heads/${this.config.branch}`
+          );
+          const commit = await this.githubRequest(ref.object.url.replace("https://api.github.com", ""));
+          treeSha = commit.tree.sha;
+        } catch (error) {
+          if (error.message.includes("404")) {
+            console.log("Branch not found or empty, returning empty tree");
+            return [];
+          }
+          throw error;
+        }
+      }
+      if (treeSha === "4b825dc642cb6eb9a060e54bf8d69288fbee4904") {
+        console.log("Empty tree detected, returning empty array");
+        return [];
       }
       const tree = await this.githubRequest(
         `/repos/${this.config.repoOwner}/${this.config.repoName}/git/trees/${treeSha}?recursive=1`
       );
       return tree.tree || [];
     } catch (error) {
-      if (error.message.includes("404")) {
+      if (error.message.includes("404") || error.message.includes("Not Found")) {
+        console.log("Tree not found, returning empty array");
         return [];
       }
       throw error;
@@ -515,7 +521,10 @@ ${error.message}`;
         `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}?ref=${this.config.branch}`
       );
       if (data.type === "file" && data.content) {
-        return atob(data.content.replace(/\n/g, ""));
+        return {
+          content: atob(data.content.replace(/\n/g, "")),
+          sha: data.sha
+        };
       }
     } catch (error) {
       if (error.message.includes("404")) {
@@ -525,8 +534,125 @@ ${error.message}`;
     }
     return null;
   }
+  async readLocalFile(path) {
+    try {
+      const response = await fetch("/api/file/getFile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path })
+      });
+      if (!response.ok) {
+        console.error(`HTTP error reading ${path}: ${response.status}`);
+        return null;
+      }
+      const data = await response.json();
+      console.log(`Read file response for ${path}:`, data);
+      if (data.code === 0) {
+        if (data.data) {
+          try {
+            return atob(data.data);
+          } catch (e) {
+            return data.data;
+          }
+        }
+      } else {
+        console.error(`API error reading ${path}: ${data.msg}`);
+      }
+    } catch (error) {
+      console.error(`Failed to read local file ${path}:`, error);
+    }
+    return null;
+  }
+  async writeLocalFile(path, content) {
+    try {
+      const response = await fetch("/api/file/putFile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path,
+          file: btoa(content),
+          isDir: false
+        })
+      });
+      const data = await response.json();
+      return data.code === 0;
+    } catch (error) {
+      console.error(`Failed to write local file ${path}:`, error);
+      return false;
+    }
+  }
+  async listNotebooks() {
+    var _a;
+    try {
+      const response = await fetch("/api/notebook/lsNotebooks", {
+        method: "POST"
+      });
+      const data = await response.json();
+      return ((_a = data.data) == null ? void 0 : _a.notebooks) || [];
+    } catch (error) {
+      console.error("Failed to list notebooks:", error);
+      return [];
+    }
+  }
+  async listFiles(notebookId, path = "/") {
+    try {
+      const dirPath = `/data/${notebookId}${path}`;
+      console.log(`Listing files in: ${dirPath}`);
+      const response = await fetch("/api/file/readDir", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: dirPath
+        })
+      });
+      const data = await response.json();
+      console.log(`readDir response for ${dirPath}:`, data);
+      if (data.code !== 0) {
+        console.error(`Failed to read directory ${dirPath}:`, data.msg);
+        return [];
+      }
+      let allFiles = [];
+      for (const item of data.data || []) {
+        const itemPath = path === "/" ? `/${item.name}` : `${path}/${item.name}`;
+        if (item.isDir) {
+          const subFiles = await this.listFiles(notebookId, itemPath);
+          allFiles = allFiles.concat(subFiles);
+        } else if (item.name.endsWith(".sy")) {
+          allFiles.push({
+            name: item.name,
+            path: itemPath,
+            fullPath: `/data/${notebookId}${itemPath}`
+          });
+        }
+      }
+      return allFiles;
+    } catch (error) {
+      console.error(`Failed to list files in ${notebookId}${path}:`, error);
+      return [];
+    }
+  }
+  async getLocalFiles() {
+    const fileMap = /* @__PURE__ */ new Map();
+    const notebooks = await this.listNotebooks();
+    console.log(`Found ${notebooks.length} notebooks`);
+    for (const notebook of notebooks) {
+      console.log(`Processing notebook: ${notebook.name} (${notebook.id})`);
+      const files = await this.listFiles(notebook.id);
+      console.log(`  Found ${files.length} .sy files`);
+      for (const file of files) {
+        const content = await this.readLocalFile(file.fullPath);
+        if (content !== null) {
+          const relativePath = `${notebook.name}${file.path}`;
+          fileMap.set(relativePath, content);
+          console.log(`  Added: ${relativePath}`);
+        }
+      }
+    }
+    console.log(`Total files to sync: ${fileMap.size}`);
+    return fileMap;
+  }
   async createOrUpdateFile(path, content, sha) {
-    const message = sha ? `Update ${path} from SiYuan` : `Create ${path} from SiYuan`;
+    const message = sha ? `Update ${path}` : `Create ${path}`;
     const body = {
       message: `${message} - ${(/* @__PURE__ */ new Date()).toLocaleString()}`,
       content: btoa(unescape(encodeURIComponent(content))),
@@ -548,126 +674,6 @@ ${error.message}`;
       "PUT",
       body
     );
-  }
-  async deleteFile(path, sha) {
-    const body = {
-      message: `Delete ${path} from SiYuan - ${(/* @__PURE__ */ new Date()).toLocaleString()}`,
-      sha,
-      branch: this.config.branch,
-      committer: {
-        name: this.config.authorName,
-        email: this.config.authorEmail
-      }
-    };
-    await this.githubRequest(
-      `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}`,
-      "DELETE",
-      body
-    );
-  }
-  // SiYuan API Methods
-  async listNotebooks() {
-    var _a;
-    try {
-      const response = await fetch("/api/notebook/lsNotebooks", {
-        method: "POST"
-      });
-      const data = await response.json();
-      return ((_a = data.data) == null ? void 0 : _a.notebooks) || [];
-    } catch (error) {
-      console.error("Failed to list notebooks:", error);
-      return [];
-    }
-  }
-  async listDocsByPath(notebookId, path) {
-    var _a;
-    try {
-      const response = await fetch("/api/filetree/listDocsByPath", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ notebook: notebookId, path })
-      });
-      const data = await response.json();
-      const files = ((_a = data.data) == null ? void 0 : _a.files) || [];
-      let allFiles = [...files];
-      for (const file of files) {
-        if (file.subFileCount > 0) {
-          const subFiles = await this.listDocsByPath(notebookId, file.path);
-          allFiles = allFiles.concat(subFiles);
-        }
-      }
-      return allFiles;
-    } catch (error) {
-      console.error("Failed to list docs:", error);
-      return [];
-    }
-  }
-  async exportMarkdown(docId) {
-    var _a;
-    try {
-      const response = await fetch("/api/export/exportMdContent", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: docId })
-      });
-      const data = await response.json();
-      return ((_a = data.data) == null ? void 0 : _a.content) || "";
-    } catch (error) {
-      console.error("Failed to export markdown:", error);
-      return "";
-    }
-  }
-  async createNotebook(name) {
-    var _a;
-    try {
-      const response = await fetch("/api/notebook/createNotebook", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name })
-      });
-      const data = await response.json();
-      return (_a = data.data) == null ? void 0 : _a.notebook;
-    } catch (error) {
-      console.error("Failed to create notebook:", error);
-      return null;
-    }
-  }
-  async createDocWithMd(notebookId, path, markdown) {
-    try {
-      const response = await fetch("/api/filetree/createDocWithMd", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          notebook: notebookId,
-          path,
-          markdown
-        })
-      });
-      return await response.json();
-    } catch (error) {
-      console.error("Failed to create document:", error);
-      return null;
-    }
-  }
-  async getLocalFiles() {
-    const localFiles = [];
-    const notebooks = await this.listNotebooks();
-    for (const notebook of notebooks) {
-      const files = await this.listDocsByPath(notebook.id, "/");
-      for (const file of files) {
-        if (file.path && file.path.endsWith(".sy")) {
-          const content = await this.exportMarkdown(file.id);
-          const relativePath = file.path.replace(/^\//, "").replace(/\.sy$/, ".md");
-          localFiles.push({
-            notebook: notebook.name,
-            path: `${notebook.name}/${relativePath}`,
-            content,
-            id: file.id
-          });
-        }
-      }
-    }
-    return localFiles;
   }
   async pushToGitHub() {
     if (!this.isConfigValid()) {
@@ -691,29 +697,32 @@ ${error.message}`;
       }
       let uploaded = 0;
       let updated = 0;
+      let skipped = 0;
       let errors = 0;
-      for (const localFile of localFiles) {
+      for (const [path, content] of localFiles) {
         try {
-          const githubFile = githubFiles.get(localFile.path);
+          const githubFile = githubFiles.get(path);
           if (githubFile) {
-            const existingContent = await this.getFileContent(localFile.path);
-            if (existingContent !== localFile.content) {
-              await this.createOrUpdateFile(localFile.path, localFile.content, githubFile.sha);
-              updated++;
+            const remoteFile = await this.getFileContent(path);
+            if (remoteFile && remoteFile.content === content) {
+              skipped++;
+              continue;
             }
+            await this.createOrUpdateFile(path, content, remoteFile == null ? void 0 : remoteFile.sha);
+            updated++;
           } else {
-            await this.createOrUpdateFile(localFile.path, localFile.content);
+            await this.createOrUpdateFile(path, content);
             uploaded++;
           }
-          githubFiles.delete(localFile.path);
         } catch (error) {
-          console.error(`Failed to sync ${localFile.path}:`, error);
+          console.error(`Failed to sync ${path}:`, error);
           errors++;
         }
       }
       const message = `✅ Push complete
 📤 Uploaded: ${uploaded}
-🔄 Updated: ${updated}` + (errors > 0 ? `
+🔄 Updated: ${updated}
+⏭️ Skipped: ${skipped}` + (errors > 0 ? `
 ❌ Errors: ${errors}` : "");
       siyuan.showMessage(message, 5e3, "info");
     } catch (error) {
@@ -739,35 +748,50 @@ ${error.message}`;
       const notebookMap = new Map(notebooks.map((nb) => [nb.name, nb]));
       let created = 0;
       let updated = 0;
+      let skipped = 0;
       let errors = 0;
       for (const item of githubTree) {
-        if (item.type !== "blob" || !item.path.endsWith(".md")) {
+        if (item.type !== "blob" || !item.path.endsWith(".sy")) {
           continue;
         }
         try {
           const parts = item.path.split("/");
           const notebookName = parts[0];
-          const filePath = "/" + parts.slice(1).join("/").replace(/\.md$/, "");
+          const relativePath = "/" + parts.slice(1).join("/");
           let notebook = notebookMap.get(notebookName);
           if (!notebook) {
-            notebook = await this.createNotebook(notebookName);
-            if (notebook) {
+            const response = await fetch("/api/notebook/createNotebook", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ name: notebookName })
+            });
+            const data = await response.json();
+            if (data.code === 0) {
+              notebook = data.data.notebook;
               notebookMap.set(notebookName, notebook);
             } else {
-              console.error(`Failed to create notebook: ${notebookName}`);
               errors++;
               continue;
             }
           }
-          const content = await this.getFileContent(item.path);
-          if (content === null) {
-            console.error(`Failed to get content for: ${item.path}`);
+          const localPath = `/data/${notebook.id}${relativePath}`;
+          const remoteFile = await this.getFileContent(item.path);
+          if (!remoteFile) {
             errors++;
             continue;
           }
-          const result = await this.createDocWithMd(notebook.id, filePath, content);
-          if ((result == null ? void 0 : result.code) === 0) {
-            created++;
+          const localContent = await this.readLocalFile(localPath);
+          if (localContent === remoteFile.content) {
+            skipped++;
+            continue;
+          }
+          const success = await this.writeLocalFile(localPath, remoteFile.content);
+          if (success) {
+            if (localContent === null) {
+              created++;
+            } else {
+              updated++;
+            }
           } else {
             errors++;
           }
@@ -777,9 +801,14 @@ ${error.message}`;
         }
       }
       const message = `✅ Pull complete
-📥 Downloaded: ${created}` + (errors > 0 ? `
+📥 Created: ${created}
+🔄 Updated: ${updated}
+⏭️ Skipped: ${skipped}` + (errors > 0 ? `
 ❌ Errors: ${errors}` : "");
       siyuan.showMessage(message, 5e3, "info");
+      if (created > 0 || updated > 0) {
+        await fetch("/api/filetree/refreshFiletree", { method: "POST" });
+      }
     } catch (error) {
       this.showError("Pull failed", error);
     } finally {
@@ -796,15 +825,77 @@ ${error.message}`;
       return;
     }
     siyuan.showMessage("🔄 Starting full sync...", 3e3, "info");
+    this.isSyncing = true;
     try {
-      this.isSyncing = true;
-      await this.pullFromGitHub();
-      await this.pushToGitHub();
+      await this.pullFromGitHubInternal();
+      await new Promise((resolve) => setTimeout(resolve, 1e3));
+      await this.pushToGitHubInternal();
       siyuan.showMessage("✅ Full sync completed", 3e3, "info");
     } catch (error) {
       this.showError("Full sync failed", error);
     } finally {
       this.isSyncing = false;
+    }
+  }
+  // Internal methods that don't set isSyncing flag
+  async pullFromGitHubInternal() {
+    const githubTree = await this.getGitHubTree();
+    const notebooks = await this.listNotebooks();
+    const notebookMap = new Map(notebooks.map((nb) => [nb.name, nb]));
+    let totalProcessed = 0;
+    for (const item of githubTree) {
+      if (item.type !== "blob" || !item.path.endsWith(".sy")) continue;
+      const parts = item.path.split("/");
+      const notebookName = parts[0];
+      const relativePath = "/" + parts.slice(1).join("/");
+      let notebook = notebookMap.get(notebookName);
+      if (!notebook) {
+        const response = await fetch("/api/notebook/createNotebook", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: notebookName })
+        });
+        const data = await response.json();
+        if (data.code === 0) {
+          notebook = data.data.notebook;
+          notebookMap.set(notebookName, notebook);
+        }
+      }
+      if (notebook) {
+        const localPath = `/data/${notebook.id}${relativePath}`;
+        const remoteFile = await this.getFileContent(item.path);
+        if (remoteFile) {
+          const localContent = await this.readLocalFile(localPath);
+          if (localContent !== remoteFile.content) {
+            await this.writeLocalFile(localPath, remoteFile.content);
+            totalProcessed++;
+          }
+        }
+      }
+    }
+    if (totalProcessed > 0) {
+      await fetch("/api/filetree/refreshFiletree", { method: "POST" });
+    }
+  }
+  async pushToGitHubInternal() {
+    const localFiles = await this.getLocalFiles();
+    const githubTree = await this.getGitHubTree();
+    const githubFiles = /* @__PURE__ */ new Map();
+    for (const item of githubTree) {
+      if (item.type === "blob") {
+        githubFiles.set(item.path, item);
+      }
+    }
+    for (const [path, content] of localFiles) {
+      const githubFile = githubFiles.get(path);
+      if (githubFile) {
+        const remoteFile = await this.getFileContent(path);
+        if (!remoteFile || remoteFile.content !== content) {
+          await this.createOrUpdateFile(path, content, remoteFile == null ? void 0 : remoteFile.sha);
+        }
+      } else {
+        await this.createOrUpdateFile(path, content);
+      }
     }
   }
   async showStatus() {
@@ -816,15 +907,15 @@ ${error.message}`;
     try {
       const localFiles = await this.getLocalFiles();
       const githubTree = await this.getGitHubTree();
-      const githubMdFiles = githubTree.filter(
-        (item) => item.type === "blob" && item.path.endsWith(".md")
+      const githubSyFiles = githubTree.filter(
+        (item) => item.type === "blob" && item.path.endsWith(".sy")
       );
       const notebooks = await this.listNotebooks();
       const statusMsg = `📊 Status:
 
 📚 Local notebooks: ${notebooks.length}
-📄 Local files: ${localFiles.length}
-☁️ GitHub files: ${githubMdFiles.length}
+📄 Local files: ${localFiles.size}
+☁️ GitHub files: ${githubSyFiles.length}
 🔗 Repository: ${this.config.repoOwner}/${this.config.repoName}
 🌿 Branch: ${this.config.branch}`;
       siyuan.showMessage(statusMsg, 8e3, "info");
