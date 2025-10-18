@@ -297,6 +297,17 @@ export default class GitSyncPlugin extends Plugin {
                     }
                 }
                 
+                // Check if it's a config file with a spec/id/name structure (like av/*.json files)
+                if (('spec' in data && 'id' in data) || ('keyValues' in data) || ('name' in data && 'keyValues' in data)) {
+                    // This is a config file, convert to JSON string
+                    try {
+                        return JSON.stringify(data, null, 2);
+                    } catch (stringifyError) {
+                        console.error(`Error stringifying config file for ${path}:`, stringifyError);
+                        return null;
+                    }
+                }
+                
                 // Otherwise, check for the standard API response format
                 if (data.code === 0) {
                     // The real content is in the response, might be structured data
@@ -786,7 +797,7 @@ export default class GitSyncPlugin extends Plugin {
             for (const file of files) {
                 const content = await this.readLocalFile(file.fullPath);
                 if (content !== null) {
-                    const relativePath = `${notebook.name}${file.path}`;
+                    const relativePath = `notebooks/${notebook.name}${file.path}`;
                     fileMap.set(relativePath, content);
                     console.log(`  Added: ${relativePath}`);
                 } else {
@@ -848,7 +859,20 @@ export default class GitSyncPlugin extends Plugin {
     }
 
     private async createOrUpdateFile(path: string, content: string, sha?: string): Promise<void> {
-        const message = sha
+        // If we don't have the SHA but we think this is an update, we need to get the SHA first
+        let fileSha = sha;
+        if (!fileSha) {
+            try {
+                // Try to get the existing file to get its SHA
+                const existingFile = await this.getFileContent(path);
+                fileSha = existingFile?.sha;
+            } catch (error) {
+                // If we can't get the existing file, it probably doesn't exist, so we'll create it
+                console.log(`File ${path} doesn't exist yet, will create it`);
+            }
+        }
+
+        const message = fileSha
         ? `Update ${path}`
         : `Create ${path}`;
 
@@ -866,8 +890,8 @@ export default class GitSyncPlugin extends Plugin {
             }
         };
 
-        if (sha) {
-            body.sha = sha;
+        if (fileSha) {
+            body.sha = fileSha;
         }
 
         await this.githubRequest(

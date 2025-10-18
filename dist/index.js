@@ -560,6 +560,14 @@ ${error.message}`;
             return null;
           }
         }
+        if ("spec" in data && "id" in data || "keyValues" in data || "name" in data && "keyValues" in data) {
+          try {
+            return JSON.stringify(data, null, 2);
+          } catch (stringifyError) {
+            console.error(`Error stringifying config file for ${path}:`, stringifyError);
+            return null;
+          }
+        }
         if (data.code === 0) {
           if (data.data !== void 0 && data.data !== null) {
             try {
@@ -943,7 +951,7 @@ ${error.message}`;
       for (const file of files) {
         const content = await this.readLocalFile(file.fullPath);
         if (content !== null) {
-          const relativePath = `${notebook.name}${file.path}`;
+          const relativePath = `notebooks/${notebook.name}${file.path}`;
           fileMap.set(relativePath, content);
           console.log(`  Added: ${relativePath}`);
         } else {
@@ -997,7 +1005,16 @@ ${error.message}`;
     return fileMap;
   }
   async createOrUpdateFile(path, content, sha) {
-    const message = sha ? `Update ${path}` : `Create ${path}`;
+    let fileSha = sha;
+    if (!fileSha) {
+      try {
+        const existingFile = await this.getFileContent(path);
+        fileSha = existingFile == null ? void 0 : existingFile.sha;
+      } catch (error) {
+        console.log(`File ${path} doesn't exist yet, will create it`);
+      }
+    }
+    const message = fileSha ? `Update ${path}` : `Create ${path}`;
     const body = {
       message: `${message} - ${(/* @__PURE__ */ new Date()).toLocaleString()}`,
       content: btoa(unescape(encodeURIComponent(content))),
@@ -1011,8 +1028,8 @@ ${error.message}`;
         email: this.config.authorEmail
       }
     };
-    if (sha) {
-      body.sha = sha;
+    if (fileSha) {
+      body.sha = fileSha;
     }
     await this.githubRequest(
       `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}`,
