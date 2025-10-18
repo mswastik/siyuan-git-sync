@@ -12,7 +12,7 @@ export default defineConfig({
     viteStaticCopy({
       targets: [
         { src: "plugin.json", dest: "./" },
-        { src: "README.md", dest: "./" }
+        { src: "Readme.md", dest: "./" }
       ]
     })
   ],
@@ -31,7 +31,7 @@ export default defineConfig({
       formats: ["cjs"]
     },
     rollupOptions: {
-      external: ["siyuan", "fs", "path"],
+      external: ["siyuan", "fs", "path", "child_process", "crypto", "events", "os", "stream", "util"],
       output: {
         entryFileNames: "index.js",
         format: "cjs",

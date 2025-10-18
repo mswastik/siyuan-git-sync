@@ -1,0 +1,41 @@
+{
+  "name": "git-sync",
+  "author": "Swastik",
+  "url": "https://github.com/swastik/siyuan-git-sync",
+  "version": "1.0.0",
+  "minAppVersion": "3.0.0",
+  "runtime": {
+    "desktop": true,
+    "mobile": true,
+    "browser": false
+  },
+  "backends": [
+    "all"
+  ],
+  "frontends": [
+    "all"
+  ],
+  "displayName": {
+    "en_US": "Git Sync",
+    "zh_CN": "Git 同步"
+  },
+  "description": {
+    "en_US": "Sync your SiYuan workspace with GitHub using Git",
+    "zh_CN": "使用 Git 将您的 SiYuan 工作空间与 GitHub 同步"
+  },
+  "readme": {
+    "en_US": "README.md",
+    "zh_CN": "README.md"
+  },
+  "i18n": [
+    "en_US",
+    "zh_CN"
+  ],
+  "keywords": [
+    "git",
+    "github",
+    "sync",
+    "backup",
+    "version control"
+  ]
+}
