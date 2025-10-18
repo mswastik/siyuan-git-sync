@@ -542,40 +542,77 @@ ${error.message}`;
         body: JSON.stringify({ path })
       });
       if (!response.ok) {
-        console.error(`HTTP error reading ${path}: ${response.status}`);
+        console.error(`HTTP error reading ${path}: ${response.status} ${response.statusText}`);
         return null;
       }
-      const data = await response.json();
-      console.log(`Read file response for ${path}:`, data);
-      if (data.code === 0) {
-        if (data.data) {
+      const contentType = response.headers.get("content-type");
+      if (contentType && contentType.includes("application/json")) {
+        const data = await response.json();
+        console.log(`Read file response for ${path}:`, data);
+        if ("ID" in data && "Spec" in data && "Type" in data) {
           try {
-            return atob(data.data);
-          } catch (e) {
-            return data.data;
+            return JSON.stringify(data, null, 2);
+          } catch (stringifyError) {
+            console.error(`Error stringifying direct content for ${path}:`, stringifyError);
+            return null;
           }
         }
+        if (data.code === 0) {
+          if (data.data !== void 0 && data.data !== null) {
+            try {
+              if (typeof data.data === "object") {
+                if ("ID" in data.data && "Spec" in data.data && "Type" in data.data) {
+                  return JSON.stringify(data.data, null, 2);
+                } else {
+                  return JSON.stringify(data.data, null, 2);
+                }
+              } else if (typeof data.data === "string") {
+                return data.data;
+              } else {
+                return String(data.data);
+              }
+            } catch (stringifyError) {
+              console.error(`Error stringifying data for ${path}:`, stringifyError);
+              return null;
+            }
+          } else {
+            return "";
+          }
+        } else {
+          const errorMessage = data.msg || data.message || "Unknown error";
+          console.error(`API error reading ${path}: ${errorMessage}`);
+          return null;
+        }
       } else {
-        console.error(`API error reading ${path}: ${data.msg}`);
+        const content = await response.text();
+        console.log(`Raw content read for ${path}: length ${content.length}`);
+        return content;
       }
     } catch (error) {
       console.error(`Failed to read local file ${path}:`, error);
+      return null;
     }
-    return null;
   }
   async writeLocalFile(path, content) {
     try {
+      if (typeof content !== "string") {
+        content = String(content);
+      }
+      const contentBlob = new Blob([content], { type: "text/plain" });
+      const formData = new FormData();
+      formData.append("path", path);
+      formData.append("file", contentBlob, path.split("/").pop());
+      formData.append("isDir", "false");
       const response = await fetch("/api/file/putFile", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          path,
-          file: btoa(content),
-          isDir: false
-        })
+        // Don't set Content-Type header - let the browser set it with the boundary
+        body: formData
       });
-      const data = await response.json();
-      return data.code === 0;
+      const dataResponse = await response.json();
+      if (dataResponse.code !== 0) {
+        console.error(`API error writing ${path}:`, dataResponse.msg || dataResponse.message);
+      }
+      return dataResponse.code === 0;
     } catch (error) {
       console.error(`Failed to write local file ${path}:`, error);
       return false;
@@ -605,10 +642,15 @@ ${error.message}`;
           path: dirPath
         })
       });
+      if (!response.ok) {
+        console.error(`HTTP error listing directory ${dirPath}: ${response.status} ${response.statusText}`);
+        return [];
+      }
       const data = await response.json();
       console.log(`readDir response for ${dirPath}:`, data);
       if (data.code !== 0) {
-        console.error(`Failed to read directory ${dirPath}:`, data.msg);
+        const errorMessage = data.msg || data.message || "Unknown error";
+        console.error(`Failed to read directory ${dirPath}:`, errorMessage);
         return [];
       }
       let allFiles = [];
@@ -645,6 +687,8 @@ ${error.message}`;
           const relativePath = `${notebook.name}${file.path}`;
           fileMap.set(relativePath, content);
           console.log(`  Added: ${relativePath}`);
+        } else {
+          console.error(`  Failed to read: ${file.fullPath}`);
         }
       }
     }
@@ -760,18 +804,25 @@ ${error.message}`;
           const relativePath = "/" + parts.slice(1).join("/");
           let notebook = notebookMap.get(notebookName);
           if (!notebook) {
-            const response = await fetch("/api/notebook/createNotebook", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ name: notebookName })
-            });
-            const data = await response.json();
-            if (data.code === 0) {
-              notebook = data.data.notebook;
+            const matchingNotebook = notebooks.find((nb) => nb.name === notebookName || nb.id === notebookName);
+            if (matchingNotebook) {
+              notebook = matchingNotebook;
               notebookMap.set(notebookName, notebook);
             } else {
-              errors++;
-              continue;
+              const response = await fetch("/api/notebook/createNotebook", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ name: notebookName })
+              });
+              const data = await response.json();
+              if (data.code === 0) {
+                notebook = data.data.notebook;
+                notebookMap.set(notebookName, notebook);
+              } else {
+                console.error(`Failed to create notebook ${notebookName}:`, data);
+                errors++;
+                continue;
+              }
             }
           }
           const localPath = `/data/${notebook.id}${relativePath}`;
@@ -781,7 +832,7 @@ ${error.message}`;
             continue;
           }
           const localContent = await this.readLocalFile(localPath);
-          if (localContent === remoteFile.content) {
+          if (localContent !== null && localContent === remoteFile.content) {
             skipped++;
             continue;
           }
@@ -793,6 +844,7 @@ ${error.message}`;
               updated++;
             }
           } else {
+            console.error(`Failed to write local file ${localPath}`);
             errors++;
           }
         } catch (error) {
@@ -808,6 +860,12 @@ ${error.message}`;
       siyuan.showMessage(message, 5e3, "info");
       if (created > 0 || updated > 0) {
         await fetch("/api/filetree/refreshFiletree", { method: "POST" });
+        await fetch("/api/filetree/renameDoc", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ notebook: "", path: "/" })
+        }).catch(() => {
+        });
       }
     } catch (error) {
       this.showError("Pull failed", error);

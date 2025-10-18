@@ -45,7 +45,7 @@ export default class GitSyncPlugin extends Plugin {
         autoSync: false,
         syncInterval: 30
     };
-
+    
     private topBarElement: HTMLElement;
     private syncIntervalId: number | null = null;
     private isSyncing = false;
@@ -53,12 +53,12 @@ export default class GitSyncPlugin extends Plugin {
 
     async onload() {
         console.log("Loading Git Sync Plugin");
-
+        
         this.settingUtils = new SettingUtils({
             plugin: this,
             name: STORAGE_NAME
         });
-
+        
         this.registerSettings();
         await this.loadConfig();
         this.addTopBarIcon();
@@ -83,9 +83,9 @@ export default class GitSyncPlugin extends Plugin {
         try {
             const savedConfig = await this.loadData(STORAGE_NAME);
             if (savedConfig) {
-                const parsed = typeof savedConfig === 'string'
-                ? JSON.parse(savedConfig)
-                : savedConfig;
+                const parsed = typeof savedConfig === 'string' 
+                    ? JSON.parse(savedConfig) 
+                    : savedConfig;
                 this.config = { ...this.config, ...parsed };
                 console.log("Config loaded successfully");
             }
@@ -96,13 +96,13 @@ export default class GitSyncPlugin extends Plugin {
 
     private async saveConfig() {
         await this.saveData(STORAGE_NAME, JSON.stringify(this.config, null, 2));
-
+        
         if (this.config.autoSync && this.isConfigValid()) {
             this.startAutoSync();
         } else {
             this.stopAutoSync();
         }
-
+        
         showMessage("✅ Configuration saved", 2000, "info");
     }
 
@@ -151,11 +151,11 @@ export default class GitSyncPlugin extends Plugin {
 
         try {
             const response = await fetch(url, options);
-
+            
             if (!response.ok) {
                 const errorText = await response.text();
                 let errorMsg = `GitHub API Error (${response.status})`;
-
+                
                 if (response.status === 401) {
                     errorMsg += ": Invalid token";
                 } else if (response.status === 403) {
@@ -165,7 +165,7 @@ export default class GitSyncPlugin extends Plugin {
                 } else {
                     errorMsg += `: ${errorText}`;
                 }
-
+                
                 throw new Error(errorMsg);
             }
 
@@ -200,7 +200,7 @@ export default class GitSyncPlugin extends Plugin {
     private async getGitHubTree(sha?: string): Promise<GitHubTreeItem[]> {
         try {
             let treeSha = sha;
-
+            
             if (!treeSha) {
                 try {
                     const ref = await this.githubRequest(
@@ -227,7 +227,7 @@ export default class GitSyncPlugin extends Plugin {
             const tree = await this.githubRequest(
                 `/repos/${this.config.repoOwner}/${this.config.repoName}/git/trees/${treeSha}?recursive=1`
             );
-
+            
             return tree.tree || [];
         } catch (error: any) {
             if (error.message.includes("404") || error.message.includes("Not Found")) {
@@ -243,7 +243,7 @@ export default class GitSyncPlugin extends Plugin {
             const data = await this.githubRequest(
                 `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}?ref=${this.config.branch}`
             );
-
+            
             if (data.type === "file" && data.content) {
                 return {
                     content: atob(data.content.replace(/\n/g, '')),
@@ -266,107 +266,66 @@ export default class GitSyncPlugin extends Plugin {
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ path })
             });
-
+            
             if (!response.ok) {
                 console.error(`HTTP error reading ${path}: ${response.status} ${response.statusText}`);
                 return null;
             }
-
-            // Check if the response is JSON or raw content
-            const contentType = response.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-                // Handle the structured response from SiYuan API
-                const data = await response.json();
-                console.log(`Read file response for ${path}:`, data);
-
-                // SiYuan API may return the content directly without the standard wrapper for certain file types
-                // If the response has ID, Spec, Type fields directly at the top level, it's the content
-                if ('ID' in data && 'Spec' in data && 'Type' in data) {
-                    // This is the actual file content (structured document), convert to JSON string
-                    try {
-                        return JSON.stringify(data, null, 2);
-                    } catch (stringifyError) {
-                        console.error(`Error stringifying direct content for ${path}:`, stringifyError);
-                        return null;
-                    }
-                }
-                
-                // Otherwise, check for the standard API response format
-                if (data.code === 0) {
-                    // The real content is in the response, might be structured data
-                    if (data.data !== undefined && data.data !== null) {
-                        try {
-                            // If data.data exists and has SiYuan document structure, convert to JSON string
-                            if (typeof data.data === 'object') {
-                                // Check if it has SiYuan document structure (ID, Spec, Type fields)
-                                if ('ID' in data.data && 'Spec' in data.data && 'Type' in data.data) {
-                                    // This is a structured document object, convert to JSON string
-                                    return JSON.stringify(data.data, null, 2);
-                                } else {
-                                    // This could be another type of object, convert to JSON string
-                                    return JSON.stringify(data.data, null, 2);
-                                }
-                            }
-                            // If it's already a string, return as-is
-                            else if (typeof data.data === 'string') {
+            
+            const data = await response.json();
+            console.log(`Read file response for ${path}:`, data);
+            
+            if (data.code === 0) {
+                // The data might be base64 encoded or plain text
+                if (data.data !== undefined) {
+                    if (typeof data.data === 'string') {
+                        // Check if it's base64 encoded - typical base64 strings contain A-Z, a-z, 0-9, +, / characters
+                        // and often end with =, == or no padding
+                        const base64Regex = /^[A-Za-z0-9+/]*={0,2}$/;
+                        if (base64Regex.test(data.data)) {
+                            try {
+                                // Decode base64 and convert to UTF-8 string
+                                return atob(data.data);
+                            } catch (decodeError) {
+                                // If base64 decoding fails, return as-is
                                 return data.data;
-                            } else {
-                                // Convert other types to string
-                                return String(data.data);
                             }
-                        } catch (stringifyError) {
-                            console.error(`Error stringifying data for ${path}:`, stringifyError);
-                            return null;
+                        } else {
+                            // It's likely already a plain text string
+                            return data.data;
                         }
                     } else {
-                        // If data.data is null/undefined but code is 0, return empty string
-                        return "";
+                        // If data.data is not a string, convert it to string
+                        return String(data.data);
                     }
                 } else {
-                    // Handle case where msg might not exist
-                    const errorMessage = data.msg || data.message || 'Unknown error';
-                    console.error(`API error reading ${path}: ${errorMessage}`);
+                    console.warn(`No data returned for file: ${path}`);
                     return null;
                 }
             } else {
-                // For non-JSON responses (probably raw file content), read as text
-                const content = await response.text();
-                console.log(`Raw content read for ${path}: length ${content.length}`);
-                return content;
+                // Handle case where msg might not exist
+                const errorMessage = data.msg || data.message || 'Unknown error' || JSON.stringify(data);
+                console.error(`API error reading ${path}: ${errorMessage}`);
             }
         } catch (error) {
             console.error(`Failed to read local file ${path}:`, error);
-            return null;
         }
+        return null;
     }
 
     private async writeLocalFile(path: string, content: string): Promise<boolean> {
         try {
-            // Ensure content is a string
-            if (typeof content !== 'string') {
-                content = String(content);
-            }
-            
-            // Create a Blob from the content
-            const contentBlob = new Blob([content], { type: 'text/plain' });
-            
-            // Create FormData as SiYuan API might expect multipart form data
-            const formData = new FormData();
-            formData.append('path', path);
-            formData.append('file', contentBlob, path.split('/').pop()); // Use the filename from the path
-            formData.append('isDir', 'false');
-            
             const response = await fetch("/api/file/putFile", {
                 method: "POST",
-                // Don't set Content-Type header - let the browser set it with the boundary
-                body: formData
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    path,
+                    file: btoa(content),
+                    isDir: false
+                })
             });
-            
-            const dataResponse = await response.json();
-            if (dataResponse.code !== 0) {
-                console.error(`API error writing ${path}:`, dataResponse.msg || dataResponse.message);
-            }
-            return dataResponse.code === 0;
+            const data = await response.json();
+            return data.code === 0;
         } catch (error) {
             console.error(`Failed to write local file ${path}:`, error);
             return false;
@@ -390,7 +349,7 @@ export default class GitSyncPlugin extends Plugin {
         try {
             const dirPath = `/data/${notebookId}${path}`;
             console.log(`Listing files in: ${dirPath}`);
-
+            
             const response = await fetch("/api/file/readDir", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -398,26 +357,26 @@ export default class GitSyncPlugin extends Plugin {
                     path: dirPath
                 })
             });
-
+            
             if (!response.ok) {
                 console.error(`HTTP error listing directory ${dirPath}: ${response.status} ${response.statusText}`);
                 return [];
             }
-
+            
             const data = await response.json();
             console.log(`readDir response for ${dirPath}:`, data);
-
+            
             if (data.code !== 0) {
                 const errorMessage = data.msg || data.message || 'Unknown error';
                 console.error(`Failed to read directory ${dirPath}:`, errorMessage);
                 return [];
             }
-
+            
             let allFiles: any[] = [];
-
+            
             for (const item of data.data || []) {
                 const itemPath = path === "/" ? `/${item.name}` : `${path}/${item.name}`;
-
+                
                 if (item.isDir) {
                     const subFiles = await this.listFiles(notebookId, itemPath);
                     allFiles = allFiles.concat(subFiles);
@@ -429,7 +388,7 @@ export default class GitSyncPlugin extends Plugin {
                     });
                 }
             }
-
+            
             return allFiles;
         } catch (error) {
             console.error(`Failed to list files in ${notebookId}${path}:`, error);
@@ -440,35 +399,33 @@ export default class GitSyncPlugin extends Plugin {
     private async getLocalFiles(): Promise<Map<string, string>> {
         const fileMap = new Map<string, string>();
         const notebooks = await this.listNotebooks();
-
+        
         console.log(`Found ${notebooks.length} notebooks`);
-
+        
         for (const notebook of notebooks) {
             console.log(`Processing notebook: ${notebook.name} (${notebook.id})`);
             const files = await this.listFiles(notebook.id);
             console.log(`  Found ${files.length} .sy files`);
-
+            
             for (const file of files) {
                 const content = await this.readLocalFile(file.fullPath);
                 if (content !== null) {
                     const relativePath = `${notebook.name}${file.path}`;
                     fileMap.set(relativePath, content);
                     console.log(`  Added: ${relativePath}`);
-                } else {
-                    console.error(`  Failed to read: ${file.fullPath}`);
                 }
             }
         }
-
+        
         console.log(`Total files to sync: ${fileMap.size}`);
         return fileMap;
     }
 
     private async createOrUpdateFile(path: string, content: string, sha?: string): Promise<void> {
-        const message = sha
-        ? `Update ${path}`
-        : `Create ${path}`;
-
+        const message = sha 
+            ? `Update ${path}`
+            : `Create ${path}`;
+        
         const body: any = {
             message: `${message} - ${new Date().toLocaleString()}`,
             content: btoa(unescape(encodeURIComponent(content))),
@@ -489,8 +446,8 @@ export default class GitSyncPlugin extends Plugin {
 
         await this.githubRequest(
             `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}`,
-                                 "PUT",
-                                 body
+            "PUT",
+            body
         );
     }
 
@@ -511,7 +468,7 @@ export default class GitSyncPlugin extends Plugin {
         try {
             const localFiles = await this.getLocalFiles();
             const githubTree = await this.getGitHubTree();
-
+            
             const githubFiles = new Map<string, GitHubTreeItem>();
             for (const item of githubTree) {
                 if (item.type === "blob") {
@@ -527,7 +484,7 @@ export default class GitSyncPlugin extends Plugin {
             for (const [path, content] of localFiles) {
                 try {
                     const githubFile = githubFiles.get(path);
-
+                    
                     if (githubFile) {
                         const remoteFile = await this.getFileContent(path);
                         if (remoteFile && remoteFile.content === content) {
@@ -547,11 +504,11 @@ export default class GitSyncPlugin extends Plugin {
             }
 
             const message = `✅ Push complete\n` +
-            `📤 Uploaded: ${uploaded}\n` +
-            `🔄 Updated: ${updated}\n` +
-            `⏭️ Skipped: ${skipped}` +
-            (errors > 0 ? `\n❌ Errors: ${errors}` : '');
-
+                `📤 Uploaded: ${uploaded}\n` +
+                `🔄 Updated: ${updated}\n` +
+                `⏭️ Skipped: ${skipped}` +
+                (errors > 0 ? `\n❌ Errors: ${errors}` : '');
+            
             showMessage(message, 5000, "info");
         } catch (error) {
             this.showError("Push failed", error);
@@ -596,41 +553,32 @@ export default class GitSyncPlugin extends Plugin {
 
                     let notebook = notebookMap.get(notebookName);
                     if (!notebook) {
-                        // Try to find if there's a notebook with matching ID in the name
-                        const matchingNotebook = notebooks.find((nb: any) => nb.name === notebookName || nb.id === notebookName);
-                        if (matchingNotebook) {
-                            notebook = matchingNotebook;
+                        const response = await fetch("/api/notebook/createNotebook", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({ name: notebookName })
+                        });
+                        const data = await response.json();
+                        if (data.code === 0) {
+                            notebook = data.data.notebook;
                             notebookMap.set(notebookName, notebook);
                         } else {
-                            // Create a new notebook if it doesn't exist
-                            const response = await fetch("/api/notebook/createNotebook", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({ name: notebookName })
-                            });
-                            const data = await response.json();
-                            if (data.code === 0) {
-                                notebook = data.data.notebook;
-                                notebookMap.set(notebookName, notebook);
-                            } else {
-                                console.error(`Failed to create notebook ${notebookName}:`, data);
-                                errors++;
-                                continue;
-                            }
+                            errors++;
+                            continue;
                         }
                     }
 
                     const localPath = `/data/${notebook.id}${relativePath}`;
                     const remoteFile = await this.getFileContent(item.path);
-
+                    
                     if (!remoteFile) {
                         errors++;
                         continue;
                     }
 
                     const localContent = await this.readLocalFile(localPath);
-
-                    if (localContent !== null && localContent === remoteFile.content) {
+                    
+                    if (localContent === remoteFile.content) {
                         skipped++;
                         continue;
                     }
@@ -643,7 +591,6 @@ export default class GitSyncPlugin extends Plugin {
                             updated++;
                         }
                     } else {
-                        console.error(`Failed to write local file ${localPath}`);
                         errors++;
                     }
                 } catch (error) {
@@ -653,22 +600,16 @@ export default class GitSyncPlugin extends Plugin {
             }
 
             const message = `✅ Pull complete\n` +
-            `📥 Created: ${created}\n` +
-            `🔄 Updated: ${updated}\n` +
-            `⏭️ Skipped: ${skipped}` +
-            (errors > 0 ? `\n❌ Errors: ${errors}` : '');
-
+                `📥 Created: ${created}\n` +
+                `🔄 Updated: ${updated}\n` +
+                `⏭️ Skipped: ${skipped}` +
+                (errors > 0 ? `\n❌ Errors: ${errors}` : '');
+            
             showMessage(message, 5000, "info");
-
+            
             // Reload workspace to show new files
             if (created > 0 || updated > 0) {
                 await fetch("/api/filetree/refreshFiletree", { method: "POST" });
-                // Also try to refresh the document tree view
-                await fetch("/api/filetree/renameDoc", { 
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ notebook: "", path: "/" })
-                }).catch(() => {}); // Ignore errors from this optional refresh
             }
         } catch (error) {
             this.showError("Pull failed", error);
@@ -682,7 +623,7 @@ export default class GitSyncPlugin extends Plugin {
             showMessage("⚠️ Please configure settings first", 3000, "error");
             return;
         }
-
+        
         if (this.isSyncing) {
             showMessage("⏳ Sync already in progress", 2000, "info");
             return;
@@ -694,13 +635,13 @@ export default class GitSyncPlugin extends Plugin {
         try {
             // Pull first to get remote changes
             await this.pullFromGitHubInternal();
-
+            
             // Small delay to ensure files are written
             await new Promise(resolve => setTimeout(resolve, 1000));
-
+            
             // Then push local changes
             await this.pushToGitHubInternal();
-
+            
             showMessage("✅ Full sync completed", 3000, "info");
         } catch (error) {
             this.showError("Full sync failed", error);
@@ -741,7 +682,7 @@ export default class GitSyncPlugin extends Plugin {
             if (notebook) {
                 const localPath = `/data/${notebook.id}${relativePath}`;
                 const remoteFile = await this.getFileContent(item.path);
-
+                
                 if (remoteFile) {
                     const localContent = await this.readLocalFile(localPath);
                     if (localContent !== remoteFile.content) {
@@ -760,7 +701,7 @@ export default class GitSyncPlugin extends Plugin {
     private async pushToGitHubInternal() {
         const localFiles = await this.getLocalFiles();
         const githubTree = await this.getGitHubTree();
-
+        
         const githubFiles = new Map<string, GitHubTreeItem>();
         for (const item of githubTree) {
             if (item.type === "blob") {
@@ -772,7 +713,7 @@ export default class GitSyncPlugin extends Plugin {
 
         for (const [path, content] of localFiles) {
             const githubFile = githubFiles.get(path);
-
+            
             if (githubFile) {
                 const remoteFile = await this.getFileContent(path);
                 if (!remoteFile || remoteFile.content !== content) {
@@ -797,18 +738,18 @@ export default class GitSyncPlugin extends Plugin {
         try {
             const localFiles = await this.getLocalFiles();
             const githubTree = await this.getGitHubTree();
-            const githubSyFiles = githubTree.filter(item =>
-            item.type === "blob" && item.path.endsWith('.sy')
+            const githubSyFiles = githubTree.filter(item => 
+                item.type === "blob" && item.path.endsWith('.sy')
             );
 
             const notebooks = await this.listNotebooks();
-
+            
             const statusMsg = `📊 Status:\n\n` +
-            `📚 Local notebooks: ${notebooks.length}\n` +
-            `📄 Local files: ${localFiles.size}\n` +
-            `☁️ GitHub files: ${githubSyFiles.length}\n` +
-            `🔗 Repository: ${this.config.repoOwner}/${this.config.repoName}\n` +
-            `🌿 Branch: ${this.config.branch}`;
+                `📚 Local notebooks: ${notebooks.length}\n` +
+                `📄 Local files: ${localFiles.size}\n` +
+                `☁️ GitHub files: ${githubSyFiles.length}\n` +
+                `🔗 Repository: ${this.config.repoOwner}/${this.config.repoName}\n` +
+                `🌿 Branch: ${this.config.branch}`;
 
             showMessage(statusMsg, 8000, "info");
         } catch (error) {
@@ -845,15 +786,15 @@ export default class GitSyncPlugin extends Plugin {
             type: "textinput",
             title: "Repository Owner",
             description: "GitHub username or organization (e.g., 'octocat')",
-                                  action: {
-                                      callback: () => {
-                                          const value = this.settingUtils.take("repoOwner");
-                                          if (value !== undefined) {
-                                              this.config.repoOwner = String(value).trim();
-                                              this.saveConfig();
-                                          }
-                                      }
-                                  }
+            action: {
+                callback: () => {
+                    const value = this.settingUtils.take("repoOwner");
+                    if (value !== undefined) {
+                        this.config.repoOwner = String(value).trim();
+                        this.saveConfig();
+                    }
+                }
+            }
         });
 
         this.settingUtils.addItem({
@@ -862,15 +803,15 @@ export default class GitSyncPlugin extends Plugin {
             type: "textinput",
             title: "Repository Name",
             description: "Repository name (e.g., 'my-notes')",
-                                  action: {
-                                      callback: () => {
-                                          const value = this.settingUtils.take("repoName");
-                                          if (value !== undefined) {
-                                              this.config.repoName = String(value).trim();
-                                              this.saveConfig();
-                                          }
-                                      }
-                                  }
+            action: {
+                callback: () => {
+                    const value = this.settingUtils.take("repoName");
+                    if (value !== undefined) {
+                        this.config.repoName = String(value).trim();
+                        this.saveConfig();
+                    }
+                }
+            }
         });
 
         this.settingUtils.addItem({
@@ -879,15 +820,15 @@ export default class GitSyncPlugin extends Plugin {
             type: "textinput",
             title: "Branch",
             description: "Git branch (default: main)",
-                                  action: {
-                                      callback: () => {
-                                          const value = this.settingUtils.take("branch");
-                                          if (value !== undefined) {
-                                              this.config.branch = String(value).trim() || "main";
-                                              this.saveConfig();
-                                          }
-                                      }
-                                  }
+            action: {
+                callback: () => {
+                    const value = this.settingUtils.take("branch");
+                    if (value !== undefined) {
+                        this.config.branch = String(value).trim() || "main";
+                        this.saveConfig();
+                    }
+                }
+            }
         });
 
         this.settingUtils.addItem({
@@ -963,16 +904,16 @@ export default class GitSyncPlugin extends Plugin {
             value: this.config.syncInterval,
             type: "number",
             title: "Sync Interval (minutes)",
-                                  description: "Minutes between syncs (min 5)",
-                                  action: {
-                                      callback: () => {
-                                          const value = this.settingUtils.take("syncInterval");
-                                          if (value !== undefined) {
-                                              this.config.syncInterval = Math.max(5, Number(value));
-                                              this.saveConfig();
-                                          }
-                                      }
-                                  }
+            description: "Minutes between syncs (min 5)",
+            action: {
+                callback: () => {
+                    const value = this.settingUtils.take("syncInterval");
+                    if (value !== undefined) {
+                        this.config.syncInterval = Math.max(5, Number(value));
+                        this.saveConfig();
+                    }
+                }
+            }
         });
 
         this.settingUtils.addItem({
@@ -1002,10 +943,10 @@ export default class GitSyncPlugin extends Plugin {
             settingPanel.open(STORAGE_NAME);
         }
     }
-
+    
     private showMenu() {
         const menu = new Menu("gitSyncMenu");
-
+        
         menu.addItem({
             icon: "iconSettings",
             label: "⚙️ Settings",
@@ -1013,9 +954,9 @@ export default class GitSyncPlugin extends Plugin {
                 this.openSetting();
             }
         });
-
+        
         menu.addSeparator();
-
+        
         menu.addItem({
             icon: "iconRefresh",
             label: "🔄 Full Sync",
@@ -1023,7 +964,7 @@ export default class GitSyncPlugin extends Plugin {
                 this.fullSync();
             }
         });
-
+        
         menu.addItem({
             icon: "iconDownload",
             label: "📥 Pull from GitHub",
@@ -1031,7 +972,7 @@ export default class GitSyncPlugin extends Plugin {
                 this.pullFromGitHub();
             }
         });
-
+        
         menu.addItem({
             icon: "iconUpload",
             label: "📤 Push to GitHub",
@@ -1039,9 +980,9 @@ export default class GitSyncPlugin extends Plugin {
                 this.pushToGitHub();
             }
         });
-
+        
         menu.addSeparator();
-
+        
         menu.addItem({
             icon: "iconInfo",
             label: "📊 Status",
@@ -1049,7 +990,7 @@ export default class GitSyncPlugin extends Plugin {
                 this.showStatus();
             }
         });
-
+        
         menu.addItem({
             icon: "iconTest",
             label: "🔍 Test Connection",
@@ -1057,7 +998,7 @@ export default class GitSyncPlugin extends Plugin {
                 this.testConnection();
             }
         });
-
+        
         const rect = this.topBarElement.getBoundingClientRect();
         menu.open({
             x: rect.left,
