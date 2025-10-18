@@ -1,0 +1,16 @@
+{
+    "gitSync": {
+        "gitSync": "Git 同步",
+        "gitSyncSettings": "Git 同步设置",
+        "enableGitSync": "启用 Git 同步",
+        "repoPath": "仓库路径",
+        "autoCommit": "自动提交",
+        "commitMessage": "提交信息",
+        "syncNow": "立即同步",
+        "lastSync": "上次同步",
+        "status": "状态",
+        "username": "用户名",
+        "email": "邮箱",
+        "branch": "分支"
+    }
+}

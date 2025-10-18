@@ -1,41 +1,31 @@
 {
-  "name": "git-sync",
-  "author": "Swastik",
-  "url": "https://github.com/swastik/siyuan-git-sync",
-  "version": "1.0.0",
-  "minAppVersion": "3.0.0",
-  "runtime": {
-    "desktop": true,
-    "mobile": true,
-    "browser": false
-  },
-  "backends": [
-    "all"
-  ],
-  "frontends": [
-    "all"
-  ],
-  "displayName": {
-    "en_US": "Git Sync",
-    "zh_CN": "Git 同步"
-  },
-  "description": {
-    "en_US": "Sync your SiYuan workspace with GitHub using Git",
-    "zh_CN": "使用 Git 将您的 SiYuan 工作空间与 GitHub 同步"
-  },
-  "readme": {
-    "en_US": "README.md",
-    "zh_CN": "README.md"
-  },
-  "i18n": [
-    "en_US",
-    "zh_CN"
-  ],
-  "keywords": [
-    "git",
-    "github",
-    "sync",
-    "backup",
-    "version control"
-  ]
+    "name": "siyuan-git-sync",
+    "author": "Your Name",
+    "url": "https://github.com/yourusername/siyuan-git-sync",
+    "version": "0.0.1",
+    "minAppVersion": "3.0.0",
+    "runtime": {
+        "node": ">=18.0.0",
+        "npm": ">=8.0.0"
+    },
+    "backends": ["windows", "linux", "darwin", "docker"],
+    "frontends": ["desktop", "mobile", "browser-desktop", "browser-mobile"],
+    "displayName": {
+        "en_US": "Git Sync",
+        "zh_CN": "Git 同步"
+    },
+    "description": {
+        "en_US": "Automatically sync your SiYuan notes with Git",
+        "zh_CN": "自动将您的思源笔记与 Git 同步"
+    },
+    "readme": {
+        "en_US": "README.md",
+        "zh_CN": "README.md"
+    },
+    "i18n": ["en_US", "zh_CN"],
+    "key": "siyuan-git-sync",
+    "icon": "iconGit",
+    "thumb": "preview.png",
+    "css": ["index.css"],
+    "keywords": ["git", "sync", "backup", "version-control"]
 }
