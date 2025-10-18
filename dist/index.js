@@ -551,10 +551,17 @@ var implementation$1 = function bind(that) {
 var implementation = implementation$1;
 var functionBind = Function.prototype.bind || implementation;
 var functionCall = Function.prototype.call;
-var functionApply = Function.prototype.apply;
+var functionApply;
+var hasRequiredFunctionApply;
+function requireFunctionApply() {
+  if (hasRequiredFunctionApply) return functionApply;
+  hasRequiredFunctionApply = 1;
+  functionApply = Function.prototype.apply;
+  return functionApply;
+}
 var reflectApply = typeof Reflect !== "undefined" && Reflect && Reflect.apply;
 var bind$2 = functionBind;
-var $apply$1 = functionApply;
+var $apply$1 = requireFunctionApply();
 var $call$2 = functionCall;
 var $reflectApply = reflectApply;
 var actualApply = $reflectApply || bind$2.call($call$2, $apply$1);
@@ -674,7 +681,7 @@ var hasSymbols = requireHasSymbols()();
 var getProto = requireGetProto();
 var $ObjectGPO = requireObject_getPrototypeOf();
 var $ReflectGPO = requireReflect_getPrototypeOf();
-var $apply = functionApply;
+var $apply = requireFunctionApply();
 var $call = functionCall;
 var needsEval = {};
 var TypedArray = typeof Uint8Array === "undefined" || !getProto ? undefined$1 : getProto(Uint8Array);
@@ -1315,7 +1322,7 @@ function requireApplyBind() {
   if (hasRequiredApplyBind) return applyBind;
   hasRequiredApplyBind = 1;
   var bind3 = functionBind;
-  var $apply2 = functionApply;
+  var $apply2 = requireFunctionApply();
   var actualApply$1 = actualApply;
   applyBind = function applyBind2() {
     return actualApply$1(bind3, $apply2, arguments);
@@ -23127,6 +23134,355 @@ fsCallbackApiList.fsCallbackApiList = [
   module2.exports.semantic = true;
 })(lib$2, lib$2.exports);
 var libExports = lib$2.exports;
+const createDefaultGetter = (type2) => {
+  let getter;
+  switch (type2) {
+    case "checkbox":
+      getter = (ele) => {
+        return ele.checked;
+      };
+      break;
+    case "select":
+    case "slider":
+    case "textinput":
+    case "textarea":
+      getter = (ele) => {
+        return ele.value;
+      };
+      break;
+    case "number":
+      getter = (ele) => {
+        return parseInt(ele.value);
+      };
+      break;
+    default:
+      getter = () => null;
+      break;
+  }
+  return getter;
+};
+const createDefaultSetter = (type2) => {
+  let setter;
+  switch (type2) {
+    case "checkbox":
+      setter = (ele, value) => {
+        ele.checked = value;
+      };
+      break;
+    case "select":
+    case "slider":
+    case "textinput":
+    case "textarea":
+    case "number":
+      setter = (ele, value) => {
+        ele.value = value;
+      };
+      break;
+    default:
+      setter = () => {
+      };
+      break;
+  }
+  return setter;
+};
+class SettingUtils {
+  constructor(args) {
+    this.settings = /* @__PURE__ */ new Map();
+    this.elements = /* @__PURE__ */ new Map();
+    this.name = args.name ?? "settings";
+    this.plugin = args.plugin;
+    this.file = this.name.endsWith(".json") ? this.name : `${this.name}.json`;
+    this.plugin.setting = new siyuan.Setting({
+      width: args.width,
+      height: args.height,
+      confirmCallback: () => {
+        for (let key of this.settings.keys()) {
+          this.updateValueFromElement(key);
+        }
+        let data = this.dump();
+        if (args.callback !== void 0) {
+          args.callback(data);
+        }
+        this.plugin.data[this.name] = data;
+        this.save(data);
+      },
+      destroyCallback: () => {
+        for (let key of this.settings.keys()) {
+          this.updateElementFromValue(key);
+        }
+      }
+    });
+  }
+  async load() {
+    let data = await this.plugin.loadData(this.file);
+    console.debug("Load config:", data);
+    if (data) {
+      for (let [key, item] of this.settings) {
+        item.value = (data == null ? void 0 : data[key]) ?? item.value;
+      }
+    }
+    this.plugin.data[this.name] = this.dump();
+    return data;
+  }
+  async save(data) {
+    data = data ?? this.dump();
+    await this.plugin.saveData(this.file, this.dump());
+    console.debug("Save config:", data);
+    return data;
+  }
+  /**
+   * read the data after saving
+   * @param key key name
+   * @returns setting item value
+   */
+  get(key) {
+    var _a;
+    return (_a = this.settings.get(key)) == null ? void 0 : _a.value;
+  }
+  /**
+   * Set data to this.settings, 
+   * but do not save it to the configuration file
+   * @param key key name
+   * @param value value
+   */
+  set(key, value) {
+    let item = this.settings.get(key);
+    if (item) {
+      item.value = value;
+      this.updateElementFromValue(key);
+    }
+  }
+  /**
+   * Set and save setting item value
+   * If you want to set and save immediately you can use this method
+   * @param key key name
+   * @param value value
+   */
+  async setAndSave(key, value) {
+    let item = this.settings.get(key);
+    if (item) {
+      item.value = value;
+      this.updateElementFromValue(key);
+      await this.save();
+    }
+  }
+  /**
+    * Read in the value of element instead of setting obj in real time
+    * @param key key name
+    * @param apply whether to apply the value to the setting object
+    *        if true, the value will be applied to the setting object
+    * @returns value in html
+    */
+  take(key, apply = false) {
+    let item = this.settings.get(key);
+    let element = this.elements.get(key);
+    if (!element) {
+      return;
+    }
+    if (apply) {
+      this.updateValueFromElement(key);
+    }
+    return item.getEleVal(element);
+  }
+  /**
+   * Read data from html and save it
+   * @param key key name
+   * @param value value
+   * @return value in html
+   */
+  async takeAndSave(key) {
+    let value = this.take(key, true);
+    await this.save();
+    return value;
+  }
+  /**
+   * Disable setting item
+   * @param key key name
+   */
+  disable(key) {
+    let element = this.elements.get(key);
+    if (element) {
+      element.disabled = true;
+    }
+  }
+  /**
+   * Enable setting item
+   * @param key key name
+   */
+  enable(key) {
+    let element = this.elements.get(key);
+    if (element) {
+      element.disabled = false;
+    }
+  }
+  /**
+   * 将设置项目导出为 JSON 对象
+   * @returns object
+   */
+  dump() {
+    let data = {};
+    for (let [key, item] of this.settings) {
+      if (item.type === "button") continue;
+      data[key] = item.value;
+    }
+    return data;
+  }
+  addItem(item) {
+    this.settings.set(item.key, item);
+    const IsCustom = item.type === "custom";
+    let error = IsCustom && (item.createElement === void 0 || item.getEleVal === void 0 || item.setEleVal === void 0);
+    if (error) {
+      console.error("The custom setting item must have createElement, getEleVal and setEleVal methods");
+      return;
+    }
+    if (item.getEleVal === void 0) {
+      item.getEleVal = createDefaultGetter(item.type);
+    }
+    if (item.setEleVal === void 0) {
+      item.setEleVal = createDefaultSetter(item.type);
+    }
+    if (item.createElement === void 0) {
+      let itemElement = this.createDefaultElement(item);
+      this.elements.set(item.key, itemElement);
+      this.plugin.setting.addItem({
+        title: item.title,
+        description: item == null ? void 0 : item.description,
+        direction: item == null ? void 0 : item.direction,
+        createActionElement: () => {
+          this.updateElementFromValue(item.key);
+          let element = this.getElement(item.key);
+          return element;
+        }
+      });
+    } else {
+      this.plugin.setting.addItem({
+        title: item.title,
+        description: item == null ? void 0 : item.description,
+        direction: item == null ? void 0 : item.direction,
+        createActionElement: () => {
+          let val = this.get(item.key);
+          let element = item.createElement(val);
+          this.elements.set(item.key, element);
+          return element;
+        }
+      });
+    }
+  }
+  createDefaultElement(item) {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i;
+    let itemElement;
+    const preventEnterConfirm = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    };
+    switch (item.type) {
+      case "checkbox":
+        let element = document.createElement("input");
+        element.type = "checkbox";
+        element.checked = item.value;
+        element.className = "b3-switch fn__flex-center";
+        itemElement = element;
+        element.onchange = ((_a = item.action) == null ? void 0 : _a.callback) ?? (() => {
+        });
+        break;
+      case "select":
+        let selectElement = document.createElement("select");
+        selectElement.className = "b3-select fn__flex-center fn__size200";
+        let options2 = (item == null ? void 0 : item.options) ?? {};
+        for (let val in options2) {
+          let optionElement = document.createElement("option");
+          let text = options2[val];
+          optionElement.value = val;
+          optionElement.text = text;
+          selectElement.appendChild(optionElement);
+        }
+        selectElement.value = item.value;
+        selectElement.onchange = ((_b = item.action) == null ? void 0 : _b.callback) ?? (() => {
+        });
+        itemElement = selectElement;
+        break;
+      case "slider":
+        let sliderElement = document.createElement("input");
+        sliderElement.type = "range";
+        sliderElement.className = "b3-slider fn__size200 b3-tooltips b3-tooltips__n";
+        sliderElement.ariaLabel = item.value;
+        sliderElement.min = ((_c = item.slider) == null ? void 0 : _c.min.toString()) ?? "0";
+        sliderElement.max = ((_d = item.slider) == null ? void 0 : _d.max.toString()) ?? "100";
+        sliderElement.step = ((_e = item.slider) == null ? void 0 : _e.step.toString()) ?? "1";
+        sliderElement.value = item.value;
+        sliderElement.onchange = () => {
+          var _a2;
+          sliderElement.ariaLabel = sliderElement.value;
+          (_a2 = item.action) == null ? void 0 : _a2.callback();
+        };
+        itemElement = sliderElement;
+        break;
+      case "textinput":
+        let textInputElement = document.createElement("input");
+        textInputElement.className = "b3-text-field fn__flex-center fn__size200";
+        textInputElement.value = item.value;
+        textInputElement.onchange = ((_f = item.action) == null ? void 0 : _f.callback) ?? (() => {
+        });
+        itemElement = textInputElement;
+        textInputElement.addEventListener("keydown", preventEnterConfirm);
+        break;
+      case "textarea":
+        let textareaElement = document.createElement("textarea");
+        textareaElement.className = "b3-text-field fn__block";
+        textareaElement.value = item.value;
+        textareaElement.onchange = ((_g = item.action) == null ? void 0 : _g.callback) ?? (() => {
+        });
+        itemElement = textareaElement;
+        break;
+      case "number":
+        let numberElement = document.createElement("input");
+        numberElement.type = "number";
+        numberElement.className = "b3-text-field fn__flex-center fn__size200";
+        numberElement.value = item.value;
+        itemElement = numberElement;
+        numberElement.addEventListener("keydown", preventEnterConfirm);
+        break;
+      case "button":
+        let buttonElement = document.createElement("button");
+        buttonElement.className = "b3-button b3-button--outline fn__flex-center fn__size200";
+        buttonElement.innerText = ((_h = item.button) == null ? void 0 : _h.label) ?? "Button";
+        buttonElement.onclick = ((_i = item.button) == null ? void 0 : _i.callback) ?? (() => {
+        });
+        itemElement = buttonElement;
+        break;
+      case "hint":
+        let hintElement = document.createElement("div");
+        hintElement.className = "b3-label fn__flex-center";
+        itemElement = hintElement;
+        break;
+    }
+    return itemElement;
+  }
+  /**
+   * return the setting element
+   * @param key key name
+   * @returns element
+   */
+  getElement(key) {
+    let element = this.elements.get(key);
+    return element;
+  }
+  updateValueFromElement(key) {
+    let item = this.settings.get(key);
+    if (item.type === "button") return;
+    let element = this.elements.get(key);
+    item.value = item.getEleVal(element);
+  }
+  updateElementFromValue(key) {
+    let item = this.settings.get(key);
+    if (item.type === "button") return;
+    let element = this.elements.get(key);
+    item.setEleVal(element, item.value);
+  }
+}
+const STORAGE_NAME = "git-sync-config";
 class GitSyncPlugin extends siyuan.Plugin {
   constructor() {
     super(...arguments);
@@ -23143,13 +23499,16 @@ class GitSyncPlugin extends siyuan.Plugin {
     this.syncIntervalId = null;
     this.isSyncing = false;
   }
-  // File system implementation
   async onload() {
     console.log("Loading Git Sync Plugin");
     this.fs = libExports.createFsFromVolume(libExports.vol);
+    this.settingUtils = new SettingUtils({
+      plugin: this,
+      name: STORAGE_NAME
+    });
+    this.registerSettings();
     await this.loadConfig();
     this.addTopBarIcon();
-    this.openSetting();
     if (this.config.autoSync) {
       this.startAutoSync();
     }
@@ -23160,6 +23519,14 @@ class GitSyncPlugin extends siyuan.Plugin {
     if (this.syncIntervalId) {
       clearInterval(this.syncIntervalId);
       this.syncIntervalId = null;
+    }
+  }
+  onLayoutReady() {
+    console.log("Layout ready for Git Sync Plugin");
+    try {
+      this.settingUtils.load();
+    } catch (error) {
+      console.error("Error loading settings in onLayoutReady:", error);
     }
   }
   async loadConfig() {
@@ -23187,7 +23554,7 @@ class GitSyncPlugin extends siyuan.Plugin {
       title: "Git Sync",
       position: "right",
       callback: () => {
-        this.showSyncDialog();
+        this.addMenu();
       }
     });
     this.topBarElement = iconElement;
@@ -23518,6 +23885,138 @@ Error: ${JSON.stringify(error)}`;
       console.log("Auto-sync stopped");
     }
   }
+  registerSettings() {
+    this.settingUtils.addItem({
+      key: "repoUrl",
+      value: this.config.repoUrl,
+      type: "textinput",
+      title: "Repository URL",
+      description: "GitHub repository URL (e.g., https://github.com/username/repo.git)",
+      action: {
+        callback: async () => {
+          this.config.repoUrl = this.settingUtils.take("repoUrl", true);
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "branch",
+      value: this.config.branch,
+      type: "textinput",
+      title: "Branch",
+      description: "Git branch to sync with (default: main)",
+      action: {
+        callback: async () => {
+          this.config.branch = this.settingUtils.take("branch", true);
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "username",
+      value: this.config.username,
+      type: "textinput",
+      title: "GitHub Username",
+      description: "Your GitHub username",
+      action: {
+        callback: async () => {
+          this.config.username = this.settingUtils.take("username", true);
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "token",
+      value: this.config.token,
+      type: "textinput",
+      title: "Personal Access Token",
+      description: "GitHub Personal Access Token",
+      action: {
+        callback: async () => {
+          this.config.token = this.settingUtils.take("token", true);
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "authorName",
+      value: this.config.authorName,
+      type: "textinput",
+      title: "Author Name",
+      description: "Name to use for Git commits",
+      action: {
+        callback: async () => {
+          this.config.authorName = this.settingUtils.take("authorName", true);
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "authorEmail",
+      value: this.config.authorEmail,
+      type: "textinput",
+      title: "Author Email",
+      description: "Email to use for Git commits",
+      action: {
+        callback: async () => {
+          this.config.authorEmail = this.settingUtils.take("authorEmail", true);
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "autoSync",
+      value: this.config.autoSync,
+      type: "checkbox",
+      title: "Enable Auto-Sync",
+      description: "Automatically sync at specified intervals",
+      action: {
+        callback: async () => {
+          this.config.autoSync = this.settingUtils.take("autoSync", true);
+          if (this.config.autoSync) {
+            this.startAutoSync();
+          } else {
+            this.stopAutoSync();
+          }
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "syncInterval",
+      value: this.config.syncInterval,
+      type: "number",
+      title: "Sync Interval (minutes)",
+      description: "Interval in minutes between automatic syncs (minimum 5)",
+      action: {
+        callback: async () => {
+          this.config.syncInterval = this.settingUtils.take("syncInterval", true);
+          if (this.config.autoSync) {
+            this.startAutoSync();
+          }
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "testButton",
+      value: "",
+      type: "button",
+      title: "Test Connection",
+      description: "Test connection to the Git repository",
+      button: {
+        label: "Test Connection",
+        callback: () => {
+          this.testConnection();
+        }
+      }
+    });
+    try {
+      this.settingUtils.load();
+    } catch (error) {
+      console.error("Error loading settings storage:", error);
+    }
+  }
   async fullSync() {
     if (this.isSyncing) {
       siyuan.showMessage("Sync already in progress", 2e3, "info");
@@ -23535,118 +24034,64 @@ Error: ${JSON.stringify(error)}`;
       this.isSyncing = false;
     }
   }
-  openSetting() {
-    var _a, _b;
-    this.settingPanel = document.createElement("div");
-    this.settingPanel.className = "fn__flex-column";
-    const settingHTML = `
-            <div class="config__tab-container">
-                <h2>Git Sync Configuration</h2>
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">GitHub Repository URL</div>
-                    <input class="b3-text-field fn__block" id="repo-url" 
-                           placeholder="https://github.com/username/repo.git" 
-                           value="${this.config.repoUrl}">
-                    <div class="b3-label__text ft__smaller ft__secondary">
-                        Example: https://github.com/yourusername/siyuan-backup.git
-                    </div>
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">Branch</div>
-                    <input class="b3-text-field fn__block" id="branch" 
-                           value="${this.config.branch}">
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">GitHub Username</div>
-                    <input class="b3-text-field fn__block" id="username" 
-                           value="${this.config.username}">
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">GitHub Personal Access Token</div>
-                    <input class="b3-text-field fn__block" id="token" type="password"
-                           placeholder="ghp_xxxxxxxxxxxx" 
-                           value="${this.config.token}">
-                    <div class="b3-label__text ft__smaller ft__secondary">
-                        Create at: <a href="https://github.com/settings/tokens" target="_blank">https://github.com/settings/tokens</a>
-                    </div>
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">Author Name</div>
-                    <input class="b3-text-field fn__block" id="author-name" 
-                           value="${this.config.authorName}">
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">Author Email</div>
-                    <input class="b3-text-field fn__block" id="author-email" 
-                           value="${this.config.authorEmail}">
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <label class="fn__flex">
-                        <input type="checkbox" id="auto-sync" class="b3-switch" 
-                               ${this.config.autoSync ? "checked" : ""}>
-                        <span class="b3-label__text">Enable Auto-Sync</span>
-                    </label>
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">Sync Interval (minutes)</div>
-                    <input class="b3-text-field fn__block" id="sync-interval" type="number" min="5"
-                           value="${this.config.syncInterval}">
-                </div>
-                
-                <div class="fn__flex" style="margin-top: 24px; gap: 8px;">
-                    <button class="b3-button b3-button--outline" id="save-config">
-                        💾 Save Configuration
-                    </button>
-                    <button class="b3-button b3-button--outline" id="test-connection">
-                        🔌 Test Connection
-                    </button>
-                </div>
-            </div>
-        `;
-    this.settingPanel.innerHTML = settingHTML;
-    (_a = this.settingPanel.querySelector("#save-config")) == null ? void 0 : _a.addEventListener("click", () => {
-      this.saveSettings();
+  // The openSetting method is required by SiYuan to open the plugin settings panel
+  async openSetting() {
+    this.settingUtils.plugin.setting.open();
+  }
+  addMenu() {
+    const menu = new window.siyuan.Menu("gitSyncMenu", () => {
+      console.log("Git Sync menu closed");
     });
-    (_b = this.settingPanel.querySelector("#test-connection")) == null ? void 0 : _b.addEventListener("click", () => {
-      this.testConnection();
-    });
-    this.addTab({
-      type: "setting",
-      init: () => {
-        this.settingPanel.style.padding = "16px";
-      },
-      destroy: () => {
-        console.log("Settings tab destroyed");
+    menu.addItem({
+      icon: "iconSettings",
+      label: "Plugin Settings",
+      click: () => {
+        this.openSetting();
       }
     });
-  }
-  saveSettings() {
-    const getValue = (id) => {
-      var _a;
-      return ((_a = this.settingPanel.querySelector(`#${id}`)) == null ? void 0 : _a.value) || "";
-    };
-    const getChecked = (id) => {
-      var _a;
-      return ((_a = this.settingPanel.querySelector(`#${id}`)) == null ? void 0 : _a.checked) || false;
-    };
-    this.config = {
-      repoUrl: getValue("repo-url"),
-      branch: getValue("branch"),
-      username: getValue("username"),
-      token: getValue("token"),
-      authorName: getValue("author-name"),
-      authorEmail: getValue("author-email"),
-      autoSync: getChecked("auto-sync"),
-      syncInterval: parseInt(getValue("sync-interval")) || 60
-    };
-    this.saveConfig();
+    menu.addItem({
+      icon: "iconCloud",
+      label: "Sync Operations",
+      type: "submenu",
+      submenu: [
+        {
+          icon: "iconUpload",
+          label: "Push to GitHub",
+          click: async () => {
+            await this.pushToGithub();
+          }
+        },
+        {
+          icon: "iconDownload",
+          label: "Pull from GitHub",
+          click: async () => {
+            await this.pullFromGithub();
+          }
+        },
+        {
+          icon: "iconRefresh",
+          label: "Full Sync",
+          click: async () => {
+            await this.fullSync();
+          }
+        },
+        {
+          icon: "iconInfo",
+          label: "View Status",
+          click: async () => {
+            await this.showStatus();
+          }
+        }
+      ]
+    });
+    menu.addItem({
+      icon: "iconTest",
+      label: "Test Connection",
+      click: async () => {
+        await this.testConnection();
+      }
+    });
+    menu.open();
   }
 }
 module.exports = GitSyncPlugin;

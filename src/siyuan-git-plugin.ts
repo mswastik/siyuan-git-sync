@@ -10,8 +10,10 @@ import http from "isomorphic-git/http/web";
 // For browser environments, we need to create a file system implementation
 // Using browser's IndexedDB or localStorage as the backend
 import { createFsFromVolume, vol } from "memfs";
+import { SettingUtils } from "./libs/setting-utils";
 
 const PLUGIN_NAME = "git-sync";
+const STORAGE_NAME = "git-sync-config";
 
 interface GitConfig {
     repoUrl: string;
@@ -37,10 +39,10 @@ export default class GitSyncPlugin extends Plugin {
     };
     
     private topBarElement: HTMLElement;
-    private settingPanel: HTMLElement;
     private syncIntervalId: number | null = null;
     private isSyncing = false;
     private fs: any; // File system implementation
+    private settingUtils: SettingUtils;
 
     async onload() {
         console.log("Loading Git Sync Plugin");
@@ -48,14 +50,20 @@ export default class GitSyncPlugin extends Plugin {
         // Initialize file system
         this.fs = createFsFromVolume(vol);
         
+        // Initialize settings
+        this.settingUtils = new SettingUtils({
+            plugin: this,
+            name: STORAGE_NAME
+        });
+        
+        // Add settings
+        this.registerSettings();
+        
         // Load config
         await this.loadConfig();
 
         // Add top bar icon
         this.addTopBarIcon();
-
-        // Add settings tab
-        this.openSetting();
 
         // Start auto-sync if enabled
         if (this.config.autoSync) {
@@ -72,6 +80,16 @@ export default class GitSyncPlugin extends Plugin {
         if (this.syncIntervalId) {
             clearInterval(this.syncIntervalId);
             this.syncIntervalId = null;
+        }
+    }
+
+    onLayoutReady() {
+        console.log("Layout ready for Git Sync Plugin");
+        // Load settings again when layout is ready to ensure proper initialization
+        try {
+            this.settingUtils.load();
+        } catch (error) {
+            console.error("Error loading settings in onLayoutReady:", error);
         }
     }
 
@@ -105,7 +123,7 @@ export default class GitSyncPlugin extends Plugin {
             title: "Git Sync",
             position: "right",
             callback: () => {
-                this.showSyncDialog();
+                this.addMenu();
             }
         });
         this.topBarElement = iconElement;
@@ -516,6 +534,150 @@ export default class GitSyncPlugin extends Plugin {
         }
     }
 
+    private registerSettings() {
+        // Add settings using SettingUtils
+        this.settingUtils.addItem({
+            key: "repoUrl",
+            value: this.config.repoUrl,
+            type: "textinput",
+            title: "Repository URL",
+            description: "GitHub repository URL (e.g., https://github.com/username/repo.git)",
+            action: {
+                callback: async () => {
+                    this.config.repoUrl = this.settingUtils.take("repoUrl", true);
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "branch",
+            value: this.config.branch,
+            type: "textinput",
+            title: "Branch",
+            description: "Git branch to sync with (default: main)",
+            action: {
+                callback: async () => {
+                    this.config.branch = this.settingUtils.take("branch", true);
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "username",
+            value: this.config.username,
+            type: "textinput",
+            title: "GitHub Username",
+            description: "Your GitHub username",
+            action: {
+                callback: async () => {
+                    this.config.username = this.settingUtils.take("username", true);
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "token",
+            value: this.config.token,
+            type: "textinput",
+            title: "Personal Access Token",
+            description: "GitHub Personal Access Token",
+            action: {
+                callback: async () => {
+                    this.config.token = this.settingUtils.take("token", true);
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "authorName",
+            value: this.config.authorName,
+            type: "textinput",
+            title: "Author Name",
+            description: "Name to use for Git commits",
+            action: {
+                callback: async () => {
+                    this.config.authorName = this.settingUtils.take("authorName", true);
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "authorEmail",
+            value: this.config.authorEmail,
+            type: "textinput",
+            title: "Author Email",
+            description: "Email to use for Git commits",
+            action: {
+                callback: async () => {
+                    this.config.authorEmail = this.settingUtils.take("authorEmail", true);
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "autoSync",
+            value: this.config.autoSync,
+            type: "checkbox",
+            title: "Enable Auto-Sync",
+            description: "Automatically sync at specified intervals",
+            action: {
+                callback: async () => {
+                    this.config.autoSync = this.settingUtils.take("autoSync", true);
+                    if (this.config.autoSync) {
+                        this.startAutoSync();
+                    } else {
+                        this.stopAutoSync();
+                    }
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "syncInterval",
+            value: this.config.syncInterval,
+            type: "number",
+            title: "Sync Interval (minutes)",
+            description: "Interval in minutes between automatic syncs (minimum 5)",
+            action: {
+                callback: async () => {
+                    this.config.syncInterval = this.settingUtils.take("syncInterval", true);
+                    if (this.config.autoSync) {
+                        this.startAutoSync();
+                    }
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "testButton",
+            value: "",
+            type: "button",
+            title: "Test Connection",
+            description: "Test connection to the Git repository",
+            button: {
+                label: "Test Connection",
+                callback: () => {
+                    this.testConnection();
+                }
+            }
+        });
+
+        // Load settings after registering them
+        try {
+            this.settingUtils.load();
+        } catch (error) {
+            console.error("Error loading settings storage:", error);
+        }
+    }
+
     private async fullSync() {
         if (this.isSyncing) {
             showMessage("Sync already in progress", 2000, "info");
@@ -541,124 +703,72 @@ export default class GitSyncPlugin extends Plugin {
     }
 
 
-    openSetting() {
-        this.settingPanel = document.createElement("div");
-        this.settingPanel.className = "fn__flex-column";
-        
-        const settingHTML = `
-            <div class="config__tab-container">
-                <h2>Git Sync Configuration</h2>
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">GitHub Repository URL</div>
-                    <input class="b3-text-field fn__block" id="repo-url" 
-                           placeholder="https://github.com/username/repo.git" 
-                           value="${this.config.repoUrl}">
-                    <div class="b3-label__text ft__smaller ft__secondary">
-                        Example: https://github.com/yourusername/siyuan-backup.git
-                    </div>
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">Branch</div>
-                    <input class="b3-text-field fn__block" id="branch" 
-                           value="${this.config.branch}">
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">GitHub Username</div>
-                    <input class="b3-text-field fn__block" id="username" 
-                           value="${this.config.username}">
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">GitHub Personal Access Token</div>
-                    <input class="b3-text-field fn__block" id="token" type="password"
-                           placeholder="ghp_xxxxxxxxxxxx" 
-                           value="${this.config.token}">
-                    <div class="b3-label__text ft__smaller ft__secondary">
-                        Create at: <a href="https://github.com/settings/tokens" target="_blank">https://github.com/settings/tokens</a>
-                    </div>
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">Author Name</div>
-                    <input class="b3-text-field fn__block" id="author-name" 
-                           value="${this.config.authorName}">
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">Author Email</div>
-                    <input class="b3-text-field fn__block" id="author-email" 
-                           value="${this.config.authorEmail}">
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <label class="fn__flex">
-                        <input type="checkbox" id="auto-sync" class="b3-switch" 
-                               ${this.config.autoSync ? "checked" : ""}>
-                        <span class="b3-label__text">Enable Auto-Sync</span>
-                    </label>
-                </div>
-                
-                <div class="b3-label" style="margin-top: 16px;">
-                    <div class="b3-label__text">Sync Interval (minutes)</div>
-                    <input class="b3-text-field fn__block" id="sync-interval" type="number" min="5"
-                           value="${this.config.syncInterval}">
-                </div>
-                
-                <div class="fn__flex" style="margin-top: 24px; gap: 8px;">
-                    <button class="b3-button b3-button--outline" id="save-config">
-                        💾 Save Configuration
-                    </button>
-                    <button class="b3-button b3-button--outline" id="test-connection">
-                        🔌 Test Connection
-                    </button>
-                </div>
-            </div>
-        `;
-        
-        this.settingPanel.innerHTML = settingHTML;
-        
-        // Add event listeners
-        this.settingPanel.querySelector("#save-config")?.addEventListener("click", () => {
-            this.saveSettings();
+    // The openSetting method is required by SiYuan to open the plugin settings panel
+    async openSetting() {
+        // This method is called by SiYuan when the user opens plugin settings
+        // The actual settings UI is managed by the SettingUtils class
+        // We just need to make sure the settingUtils is properly configured
+        this.settingUtils.plugin.setting.open();
+    }
+    
+    private addMenu() {
+        const menu = new (window as any).siyuan.Menu("gitSyncMenu", () => {
+            console.log("Git Sync menu closed");
         });
         
-        this.settingPanel.querySelector("#test-connection")?.addEventListener("click", () => {
-            this.testConnection();
-        });
-
-        this.addTab({
-            type: "setting",
-            init: () => {
-                this.settingPanel.style.padding = "16px";
-            },
-            destroy: () => {
-                console.log("Settings tab destroyed");
+        // Add menu items
+        menu.addItem({
+            icon: "iconSettings",
+            label: "Plugin Settings",
+            click: () => {
+                this.openSetting();
             }
         });
-    }
-
-    private saveSettings() {
-        const getValue = (id: string): string => {
-            return (this.settingPanel.querySelector(`#${id}`) as HTMLInputElement)?.value || "";
-        };
         
-        const getChecked = (id: string): boolean => {
-            return (this.settingPanel.querySelector(`#${id}`) as HTMLInputElement)?.checked || false;
-        };
-
-        this.config = {
-            repoUrl: getValue("repo-url"),
-            branch: getValue("branch"),
-            username: getValue("username"),
-            token: getValue("token"),
-            authorName: getValue("author-name"),
-            authorEmail: getValue("author-email"),
-            autoSync: getChecked("auto-sync"),
-            syncInterval: parseInt(getValue("sync-interval")) || 60
-        };
-
-        this.saveConfig();
+        menu.addItem({
+            icon: "iconCloud",
+            label: "Sync Operations",
+            type: "submenu",
+            submenu: [
+                {
+                    icon: "iconUpload",
+                    label: "Push to GitHub",
+                    click: async () => {
+                        await this.pushToGithub();
+                    }
+                },
+                {
+                    icon: "iconDownload",
+                    label: "Pull from GitHub",
+                    click: async () => {
+                        await this.pullFromGithub();
+                    }
+                },
+                {
+                    icon: "iconRefresh",
+                    label: "Full Sync",
+                    click: async () => {
+                        await this.fullSync();
+                    }
+                },
+                {
+                    icon: "iconInfo",
+                    label: "View Status",
+                    click: async () => {
+                        await this.showStatus();
+                    }
+                }
+            ]
+        });
+        
+        menu.addItem({
+            icon: "iconTest",
+            label: "Test Connection",
+            click: async () => {
+                await this.testConnection();
+            }
+        });
+        
+        menu.open();
     }
 }
