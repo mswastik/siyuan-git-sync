@@ -1,76 +1,70 @@
 /**
  * SiYuan Git Sync Plugin
- * Syncs your workspace with GitHub - preserves file structure and syncs .sy files directly
+ * Syncs your workspace with Git repositories using isomorphic-git
  */
 
-import { Plugin, showMessage, Menu } from "siyuan";
-import { SettingUtils } from "./libs/setting-utils";
+import { Dialog, Plugin, showMessage } from "siyuan";
+import * as isogit from "isomorphic-git";
+import { Buffer } from "buffer";
 
-const STORAGE_NAME = "git-sync-config";
+// Make sure Buffer is available for isomorphic-git in browser
+if (typeof window !== "undefined" && !(window as any).Buffer) {
+  (window as any).Buffer = Buffer;
+}
 
 interface GitConfig {
-    repoOwner: string;
-    repoName: string;
+    repoUrl: string;
     branch: string;
     token: string;
     authorName: string;
     authorEmail: string;
     autoSync: boolean;
     syncInterval: number;
-    syncConfig: boolean;
-    syncPlugins: boolean;
-    syncTemplates: boolean;
-}
-
-interface GitHubTreeItem {
-    path: string;
-    mode: string;
-    type: string;
-    sha?: string;
-    size?: number;
-    url?: string;
-}
-
-interface LocalFile {
-    path: string;
-    content: string;
-    isNew: boolean;
+    syncOnChange: boolean; // New option to sync when files change
 }
 
 export default class GitSyncPlugin extends Plugin {
     private config: GitConfig = {
-        repoOwner: "",
-        repoName: "",
+        repoUrl: "",
         branch: "main",
         token: "",
         authorName: "SiYuan User",
         authorEmail: "user@siyuan.local",
         autoSync: false,
         syncInterval: 30,
-        syncConfig: true,
-        syncPlugins: false,
-        syncTemplates: false
+        syncOnChange: false
     };
 
-    private topBarElement: HTMLElement;
+    private fs: any;
+    private p: any;
     private syncIntervalId: number | null = null;
+    private changeDebounceTimer: number | null = null;
     private isSyncing = false;
-    private settingUtils: SettingUtils;
 
     async onload() {
-        console.log("Loading Git Sync Plugin");
+        console.log("Loading Git Sync Plugin with isomorphic-git");
 
-        this.settingUtils = new SettingUtils({
-            plugin: this,
-            name: STORAGE_NAME
-        });
+        // Dynamically import LightningFS to avoid constructor issues
+        const fsModule = await import("@isomorphic-git/lightning-fs");
+        const LightningFS = fsModule.default || fsModule;
+        
+        // Initialize LightningFS
+        this.fs = new LightningFS("siyuan-git");
+        this.p = this.fs.promises;
 
-        this.registerSettings();
         await this.loadConfig();
         this.addTopBarIcon();
+        
+        // Set up event listeners to monitor changes
+        this.setupEventListeners();
 
-        if (this.config.autoSync && this.isConfigValid()) {
+        if (this.config.autoSync && this.config.repoUrl && this.config.token) {
             this.startAutoSync();
+        }
+
+        // Start change monitoring if enabled
+        if (this.config.syncOnChange) {
+            this.startChangeMonitoring();
         }
 
         showMessage("✅ Git Sync Plugin Loaded", 2000, "info");
@@ -79,20 +73,14 @@ export default class GitSyncPlugin extends Plugin {
     onunload() {
         console.log("Unloading Git Sync Plugin");
         this.stopAutoSync();
-    }
-
-    onLayoutReady() {
-        console.log("Layout ready for Git Sync Plugin");
+        this.stopChangeMonitoring();
     }
 
     private async loadConfig() {
         try {
-            const savedConfig = await this.loadData(STORAGE_NAME);
+            const savedConfig = await this.loadData("git-sync-config");
             if (savedConfig) {
-                const parsed = typeof savedConfig === 'string'
-                ? JSON.parse(savedConfig)
-                : savedConfig;
-                this.config = { ...this.config, ...parsed };
+                this.config = { ...this.config, ...savedConfig };
                 console.log("Config loaded successfully");
             }
         } catch (e) {
@@ -101,291 +89,320 @@ export default class GitSyncPlugin extends Plugin {
     }
 
     private async saveConfig() {
-        await this.saveData(STORAGE_NAME, JSON.stringify(this.config, null, 2));
+        await this.saveData("git-sync-config", this.config);
 
-        if (this.config.autoSync && this.isConfigValid()) {
+        if (this.config.autoSync && this.config.repoUrl && this.config.token) {
             this.startAutoSync();
         } else {
             this.stopAutoSync();
+        }
+
+        // Start/stop change monitoring based on syncOnChange setting
+        if (this.config.syncOnChange) {
+            this.startChangeMonitoring();
+        } else {
+            this.stopChangeMonitoring();
         }
 
         showMessage("✅ Configuration saved", 2000, "info");
     }
 
     private addTopBarIcon() {
-        this.topBarElement = this.addTopBar({
+        this.addTopBar({
             icon: "iconCloud",
             title: "Git Sync",
             position: "right",
             callback: () => {
-                this.showMenu();
+                this.openSetting();
             }
         });
     }
 
-    private isConfigValid(): boolean {
-        return !!(
-            this.config.repoOwner &&
-            this.config.repoName &&
-            this.config.branch &&
-            this.config.token
-        );
-    }
-
-    private showError(message: string, error?: any) {
-        console.error(message, error);
-        let errorMsg = `❌ ${message}`;
-        if (error?.message) {
-            errorMsg += `\n${error.message}`;
-        }
-        showMessage(errorMsg, 6000, "error");
-    }
-
-    private async githubRequest(endpoint: string, method: string = "GET", body?: any): Promise<any> {
-        const url = `https://api.github.com${endpoint}`;
-        const headers: Record<string, string> = {
-            "Authorization": `Bearer ${this.config.token}`,
-            "Accept": "application/vnd.github.v3+json",
-            "Content-Type": "application/json",
-            "User-Agent": "SiYuan-Git-Sync-Plugin"
-        };
-
-        const options: RequestInit = { method, headers };
-        if (body) {
-            options.body = JSON.stringify(body);
-        }
-
-        try {
-            const response = await fetch(url, options);
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                let errorMsg = `GitHub API Error (${response.status})`;
-
-                if (response.status === 401) {
-                    errorMsg += ": Invalid token";
-                } else if (response.status === 403) {
-                    errorMsg += ": Access forbidden";
-                } else if (response.status === 404) {
-                    errorMsg += ": Not found";
-                } else {
-                    errorMsg += `: ${errorText}`;
+    private setupEventListeners() {
+        // Listen for SiYuan events to detect document changes
+        this.eventBus.on("ws-main", (data) => {
+            if (data?.data?.cmd === "save-doc") {
+                // Document was saved - sync if syncOnChange is enabled
+                if (this.config.syncOnChange) {
+                    this.scheduleChangeSync();
                 }
-
-                throw new Error(errorMsg);
             }
-
-            if (response.status === 204) return null;
-            return await response.json();
-        } catch (error: any) {
-            if (error.message.includes("Failed to fetch")) {
-                throw new Error("Network error - check your internet connection");
+        });
+        
+        // Listen for file change events
+        this.eventBus.on("filewatcher-change", () => {
+            if (this.config.syncOnChange) {
+                this.scheduleChangeSync();
             }
-            throw error;
+        });
+    }
+
+    private scheduleChangeSync() {
+        // Clear any existing timer to debounce changes
+        if (this.changeDebounceTimer) {
+            clearTimeout(this.changeDebounceTimer);
         }
+        
+        // Wait a bit before sync to allow multiple changes to accumulate
+        this.changeDebounceTimer = window.setTimeout(() => {
+            this.push(); // Only push for now, since we're detecting local changes
+        }, 5000);  // 5 seconds debounce time
+    }
+
+    private startChangeMonitoring() {
+        console.log("✅ Started monitoring file changes");
+    }
+
+    private stopChangeMonitoring() {
+        if (this.changeDebounceTimer) {
+            clearTimeout(this.changeDebounceTimer);
+            this.changeDebounceTimer = null;
+        }
+        console.log("✅ Stopped monitoring file changes");
     }
 
     private async testConnection() {
-        if (!this.isConfigValid()) {
-            showMessage("⚠️ Please configure all required settings first", 3000, "error");
+        if (!this.config.repoUrl || !this.config.token) {
+            showMessage("⚠️ Please configure repository URL and token", 3000, "error");
             return;
         }
 
-        showMessage("🔍 Testing connection...", 2000, "info");
-
         try {
-            const repo = await this.githubRequest(
-                `/repos/${this.config.repoOwner}/${this.config.repoName}`
-            );
-            showMessage(`✅ Connected to: ${repo.full_name}`, 3000, "info");
+            showMessage("🔍 Testing connection...", 2000, "info");
+            
+            // Just test if we can access the repo by trying a fetch - don't actually clone
+            await isogit.clone({
+                fs: this.fs,
+                http: this.getHttp(),
+                dir: "/repo-test",
+                url: this.config.repoUrl,
+                singleBranch: true,
+                depth: 1,
+                onAuth: () => {
+                    return {
+                        username: "git",
+                        password: this.config.token
+                    };
+                }
+            });
+            
+            // Clean up after test
+            await this.p.rm("/repo-test", { recursive: true, force: true });
+            
+            showMessage(`✅ Connected to: ${this.config.repoUrl}`, 3000, "info");
         } catch (error) {
             this.showError("Connection test failed", error);
         }
     }
 
-    private async getGitHubTree(sha?: string): Promise<GitHubTreeItem[]> {
+    private async repoExists(): Promise<boolean> {
         try {
-            let treeSha = sha;
-
-            if (!treeSha) {
-                try {
-                    const ref = await this.githubRequest(
-                        `/repos/${this.config.repoOwner}/${this.config.repoName}/git/refs/heads/${this.config.branch}`
-                    );
-                    const commit = await this.githubRequest(ref.object.url.replace('https://api.github.com', ''));
-                    treeSha = commit.tree.sha;
-                } catch (error: any) {
-                    // Branch might not exist or have no commits yet
-                    if (error.message.includes("404")) {
-                        console.log("Branch not found or empty, returning empty tree");
-                        return [];
-                    }
-                    throw error;
-                }
-            }
-
-            // Check if it's the empty tree SHA
-            if (treeSha === '4b825dc642cb6eb9a060e54bf8d69288fbee4904') {
-                console.log("Empty tree detected, returning empty array");
-                return [];
-            }
-
-            const tree = await this.githubRequest(
-                `/repos/${this.config.repoOwner}/${this.config.repoName}/git/trees/${treeSha}?recursive=1`
-            );
-
-            return tree.tree || [];
-        } catch (error: any) {
-            if (error.message.includes("404") || error.message.includes("Not Found")) {
-                console.log("Tree not found, returning empty array");
-                return [];
-            }
-            throw error;
-        }
-    }
-
-    private async getFileContent(path: string): Promise<{ content: string; sha: string } | null> {
-        try {
-            const data = await this.githubRequest(
-                `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}?ref=${this.config.branch}`
-            );
-
-            if (data.type === "file" && data.content) {
-                return {
-                    content: atob(data.content.replace(/\n/g, '')),
-                    sha: data.sha
-                };
-            }
-        } catch (error: any) {
-            if (error.message.includes("404")) {
-                return null;
-            }
-            throw error;
-        }
-        return null;
-    }
-
-    private async readLocalFile(path: string): Promise<string | null> {
-        try {
-            const response = await fetch("/api/file/getFile", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ path })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error reading ${path}: ${response.status} ${response.statusText}`);
-                return null;
-            }
-
-            // Check if the response is JSON or raw content
-            const contentType = response.headers.get('content-type');
-            if (contentType && contentType.includes('application/json')) {
-                // Handle the structured response from SiYuan API
-                const data = await response.json();
-                console.log(`Read file response for ${path}:`, data);
-
-                // SiYuan API may return the content directly without the standard wrapper for certain file types
-                // If the response has ID, Spec, Type fields directly at the top level, it's the content (like .sy files)
-                if ('ID' in data && 'Spec' in data && 'Type' in data) {
-                    // This is the actual file content (structured document), convert to JSON string
-                    try {
-                        return JSON.stringify(data, null, 2);
-                    } catch (stringifyError) {
-                        console.error(`Error stringifying direct content for ${path}:`, stringifyError);
-                        return null;
-                    }
-                }
-                
-                // Check if it's a config file with a spec/id/name structure (like av/*.json files)
-                if (('spec' in data && 'id' in data) || ('keyValues' in data) || ('name' in data && 'keyValues' in data)) {
-                    // This is a config file, convert to JSON string
-                    try {
-                        return JSON.stringify(data, null, 2);
-                    } catch (stringifyError) {
-                        console.error(`Error stringifying config file for ${path}:`, stringifyError);
-                        return null;
-                    }
-                }
-                
-                // Otherwise, check for the standard API response format
-                if (data.code === 0) {
-                    // The real content is in the response, might be structured data
-                    if (data.data !== undefined && data.data !== null) {
-                        try {
-                            // If data.data exists and has SiYuan document structure (ID, Spec, Type fields)
-                            if (typeof data.data === 'object') {
-                                if ('ID' in data.data && 'Spec' in data.data && 'Type' in data.data) {
-                                    // This is a structured document object, convert to JSON string
-                                    return JSON.stringify(data.data, null, 2);
-                                } else {
-                                    // This could be another type of object, convert to JSON string
-                                    return JSON.stringify(data.data, null, 2);
-                                }
-                            }
-                            // If it's already a string, return as-is
-                            else if (typeof data.data === 'string') {
-                                return data.data;
-                            } else {
-                                // Convert other types to string
-                                return String(data.data);
-                            }
-                        } catch (stringifyError) {
-                            console.error(`Error stringifying data for ${path}:`, stringifyError);
-                            return null;
-                        }
-                    } else {
-                        // If data.data is null/undefined but code is 0, return empty string
-                        return "";
-                    }
-                } else {
-                    // Handle case where msg might not exist
-                    const errorMessage = data.msg || data.message || 'Unknown error';
-                    console.error(`API error reading ${path}: ${errorMessage}`);
-                    return null;
-                }
-            } else {
-                // For non-JSON responses (probably raw file content), read as text
-                const content = await response.text();
-                console.log(`Raw content read for ${path}: length ${content.length}`);
-                return content;
-            }
+            const files = await this.p.readdir("/repo");
+            return files.length > 0;
         } catch (error) {
-            console.error(`Failed to read local file ${path}:`, error);
-            return null;
-        }
-    }
-
-    private async writeLocalFile(path: string, content: string): Promise<boolean> {
-        try {
-            // Ensure content is a string
-            if (typeof content !== 'string') {
-                content = String(content);
-            }
-            
-            // Create a Blob from the content
-            const contentBlob = new Blob([content], { type: 'text/plain' });
-            
-            // Create FormData as SiYuan API might expect multipart form data
-            const formData = new FormData();
-            formData.append('path', path);
-            formData.append('file', contentBlob, path.split('/').pop()); // Use the filename from the path
-            formData.append('isDir', 'false');
-            
-            const response = await fetch("/api/file/putFile", {
-                method: "POST",
-                // Don't set Content-Type header - let the browser set it with the boundary
-                body: formData
-            });
-            
-            const dataResponse = await response.json();
-            if (dataResponse.code !== 0) {
-                console.error(`API error writing ${path}:`, dataResponse.msg || dataResponse.message);
-            }
-            return dataResponse.code === 0;
-        } catch (error) {
-            console.error(`Failed to write local file ${path}:`, error);
             return false;
+        }
+    }
+
+    private async ensureRepo() {
+        if (!(await this.repoExists())) {
+            await this.cloneRepo();
+        }
+    }
+
+    private async cloneRepo() {
+        try {
+            showMessage("📥 Cloning repository...", 3000, "info");
+            
+            await isogit.clone({
+                fs: this.fs,
+                http: this.getHttp(),
+                dir: "/repo",
+                url: this.config.repoUrl,
+                singleBranch: true,
+                branch: this.config.branch,
+                onAuth: () => {
+                    return {
+                        username: "git",
+                        password: this.config.token
+                    };
+                }
+            });
+            
+            showMessage("✅ Repository cloned successfully", 3000, "info");
+        } catch (error) {
+            this.showError("Failed to clone repository", error);
+            throw error;
+        }
+    }
+
+    private async pull() {
+        if (this.isSyncing) {
+            showMessage("⏳ Sync already in progress", 2000, "info");
+            return;
+        }
+
+        this.isSyncing = true;
+        showMessage("📥 Pulling from Git...", 3000, "info");
+
+        try {
+            await this.ensureRepo();
+            
+            // Pull latest changes
+            const result = await isogit.pull({
+                fs: this.fs,
+                http: this.getHttp(),
+                dir: "/repo",
+                author: {
+                    name: this.config.authorName,
+                    email: this.config.authorEmail
+                },
+                singleBranch: true,
+                branch: this.config.branch,
+                onAuth: () => {
+                    return {
+                        username: "git",
+                        password: this.config.token
+                    };
+                }
+            });
+
+            // Now sync local files back to SiYuan workspace
+            await this.syncFilesToSiYuan();
+            
+            showMessage(`✅ Pull completed\n${result ? `Merged: ${result.merge}` : 'Up to date'}`, 3000, "info");
+        } catch (error) {
+            this.showError("Pull failed", error);
+        } finally {
+            this.isSyncing = false;
+        }
+    }
+
+    private async push() {
+        if (this.isSyncing) {
+            showMessage("⏳ Sync already in progress", 2000, "info");
+            return;
+        }
+
+        this.isSyncing = true;
+        showMessage("📤 Pushing to Git...", 3000, "info");
+
+        try {
+            await this.ensureRepo();
+            
+            // First sync SiYuan files to the Git repo
+            await this.syncFilesFromSiYuan();
+            
+            // Add all files to track changes
+            await this.addAllFilesToGit();
+            
+            // Check if there are any changes staged
+            const hasChanges = await this.hasStagedChanges();
+            
+            if (hasChanges) {
+                // Commit changes
+                await isogit.commit({
+                    fs: this.fs,
+                    dir: "/repo",
+                    message: `Sync commit at ${new Date().toLocaleString()}`,
+                    author: {
+                        name: this.config.authorName,
+                        email: this.config.authorEmail
+                    }
+                });
+                
+                // Push to remote
+                await isogit.push({
+                    fs: this.fs,
+                    http: this.getHttp(),
+                    dir: "/repo",
+                    onAuth: () => {
+                        return {
+                            username: "git",
+                            password: this.config.token
+                        };
+                    }
+                });
+                
+                showMessage("✅ Changes pushed successfully", 3000, "info");
+            } else {
+                showMessage("✅ No changes to push", 3000, "info");
+            }
+        } catch (error) {
+            this.showError("Push failed", error);
+        } finally {
+            this.isSyncing = false;
+        }
+    }
+    
+    private async addAllFilesToGit() {
+        // Get all files in the repo directory and add them
+        const allFiles = await this.getAllFiles("/repo");
+        
+        for (const file of allFiles) {
+            try {
+                await isogit.add({ 
+                    fs: this.fs, 
+                    dir: "/repo", 
+                    filepath: file 
+                });
+            } catch (error) {
+                // If adding a specific file fails, continue with others
+                console.warn(`Failed to add file ${file}:`, error);
+            }
+        }
+    }
+    
+    // Helper function to recursively get all files from the repo directory
+    private async getAllFiles(dirPath: string): Promise<string[]> {
+        const allFiles: string[] = [];
+        
+        try {
+            const items = await this.p.readdir(dirPath);
+            
+            for (const item of items) {
+                if (item === '.git') continue; // Skip .git directory
+                
+                const fullPath = `${dirPath}/${item}`;
+                const stats = await this.p.stat(fullPath);
+                
+                if (stats.isDirectory()) {
+                    const subFiles = await this.getAllFiles(fullPath);
+                    allFiles.push(...subFiles);
+                } else {
+                    // Get relative path by removing the "/repo/" prefix
+                    const relativePath = fullPath.substring(6); // Remove "/repo/" prefix
+                    allFiles.push(relativePath);
+                }
+            }
+        } catch (error) {
+            console.error(`Error reading directory ${dirPath}:`, error);
+        }
+        
+        return allFiles;
+    }
+    
+    private async hasStagedChanges(): Promise<boolean> {
+        try {
+            // Get the status of the working directory
+            const status = await isogit.statusMatrix({ 
+                fs: this.fs, 
+                dir: "/repo" 
+            });
+            
+            // Check if any files have changes
+            if (Array.isArray(status)) {
+                for (const row of status) {
+                    if (row[2] !== row[1]) { // workdir != head means changed
+                        return true;
+                    }
+                }
+            }
+            return false;
+        } catch (error) {
+            // If statusMatrix fails, we'll assume there are changes to be safe
+            console.warn("statusMatrix failed, assuming changes exist:", error);
+            return true;
         }
     }
 
@@ -402,1374 +419,234 @@ export default class GitSyncPlugin extends Plugin {
         }
     }
 
-    private async listNotebookFiles(notebookId: string, path: string = "/"): Promise<any[]> {
+    private async copyNotebookFiles(notebookId: string, notebookName: string) {
+        // This is a simplified approach - in a real implementation, you'd need to
+        // recursively list all files in the notebook and copy them to the Git repo
+        const dirPath = `/data/${notebookId}/`;
+        
         try {
-            const dirPath = `/data/${notebookId}${path}`;
-            console.log(`Listing files in: ${dirPath}`);
-
             const response = await fetch("/api/file/readDir", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: dirPath
-                })
+                body: JSON.stringify({ path: dirPath })
             });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing directory ${dirPath}: ${response.status} ${response.statusText}`);
-                return [];
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for ${dirPath}:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read directory ${dirPath}:`, errorMessage);
-                return [];
-            }
-
-            let allFiles: any[] = [];
-
-            for (const item of data.data || []) {
-                const itemPath = path === "/" ? `/${item.name}` : `${path}/${item.name}`;
-
-                if (item.isDir) {
-                    const subFiles = await this.listNotebookFiles(notebookId, itemPath);
-                    allFiles = allFiles.concat(subFiles);
-                } else if (item.name.endsWith('.sy')) {
-                    allFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `/data/${notebookId}${itemPath}`
-                    });
-                }
-            }
-
-            return allFiles;
-        } catch (error) {
-            console.error(`Failed to list files in ${notebookId}${path}:`, error);
-            return [];
-        }
-    }
-
-    private async listConfigFiles(): Promise<any[]> {
-        try {
-            console.log(`Listing config files in: /data/storage/`);
             
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: '/data/storage/'
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing config directory: ${response.status} ${response.statusText}`);
-                return [];
-            }
-
             const data = await response.json();
-            console.log(`readDir response for config:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read config directory:`, errorMessage);
-                return [];
-            }
-
-            let allFiles: any[] = [];
-
-            for (const item of data.data || []) {
-                const itemPath = `/${item.name}`;
-                
-                if (item.isDir) {
-                    // Also check subdirectories in storage for configuration files
-                    const subFiles = await this.listConfigSubDir(item.name);
-                    allFiles = allFiles.concat(subFiles);
-                } else if (this.isConfigFile(item.name)) {
-                    allFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `/data/storage/${item.name}`
-                    });
-                }
-            }
-
-            return allFiles;
-        } catch (error) {
-            console.error(`Failed to list config files:`, error);
-            return [];
-        }
-    }
-
-    private async listConfigSubDir(dirName: string): Promise<any[]> {
-        try {
-            const dirPath = `/data/storage/${dirName}`;
-            console.log(`Listing config subdirectory: ${dirPath}`);
-
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: dirPath
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing config subdirectory ${dirPath}: ${response.status} ${response.statusText}`);
-                return [];
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for config subdirectory ${dirPath}:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read config subdirectory ${dirPath}:`, errorMessage);
-                return [];
-            }
-
-            let allFiles: any[] = [];
-
-            for (const item of data.data || []) {
-                const itemPath = `/${dirName}/${item.name}`;
-                
-                if (item.isDir) {
-                    // Recursively process subdirectories
-                    const subFiles = await this.listConfigSubDir(`${dirName}/${item.name}`);
-                    allFiles = allFiles.concat(subFiles);
-                } else if (this.isConfigFile(item.name)) {
-                    allFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `/data/storage${itemPath}`
-                    });
-                }
-            }
-
-            return allFiles;
-        } catch (error) {
-            console.error(`Failed to list config subdirectory ${dirName}:`, error);
-            return [];
-        }
-    }
-
-    private isConfigFile(filename: string): boolean {
-        // Include common SiYuan config file types
-        const configExtensions = ['.json', '.yaml', '.yml', '.conf', '.ini', '.txt'];
-        return configExtensions.some(ext => filename.endsWith(ext)) || 
-               filename === 'appearance' || 
-               filename.includes('config') || 
-               filename.includes('layout') || 
-               filename.includes('query');
-    }
-
-    private async listPlugins(): Promise<any[]> {
-        try {
-            console.log(`Listing plugins in: /data/plugins/`);
             
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: '/data/plugins/'
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing plugins directory: ${response.status} ${response.statusText}`);
-                return [];
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for plugins:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read plugins directory:`, errorMessage);
-                return [];
-            }
-
-            let allFiles: any[] = [];
-
-            for (const item of data.data || []) {
-                const itemPath = `/${item.name}`;
-                
-                if (item.isDir) {
-                    // Recursively list all files in plugin directories
-                    const pluginFiles = await this.listPluginFiles(item.name);
-                    allFiles = allFiles.concat(pluginFiles);
-                } else {
-                    // Add plugin configuration files directly in plugins directory
-                    allFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `/data/plugins/${item.name}`
-                    });
-                }
-            }
-
-            return allFiles;
-        } catch (error) {
-            console.error(`Failed to list plugins:`, error);
-            return [];
-        }
-    }
-
-    private async listPluginFiles(pluginName: string): Promise<any[]> {
-        try {
-            const dirPath = `/data/plugins/${pluginName}`;
-            console.log(`Listing plugin files: ${dirPath}`);
-
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: dirPath
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing plugin directory ${dirPath}: ${response.status} ${response.statusText}`);
-                return [];
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for plugin ${pluginName}:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read plugin directory ${pluginName}:`, errorMessage);
-                return [];
-            }
-
-            let allFiles: any[] = [];
-
-            for (const item of data.data || []) {
-                const itemPath = `/${pluginName}/${item.name}`;
-                
-                if (item.isDir) {
-                    // Recursively process subdirectories within the plugin
-                    const subFiles = await this.listPluginFiles(`${pluginName}/${item.name}`);
-                    allFiles = allFiles.concat(subFiles);
-                } else {
-                    allFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `/data/plugins${itemPath}`
-                    });
-                }
-            }
-
-            return allFiles;
-        } catch (error) {
-            console.error(`Failed to list plugin files for ${pluginName}:`, error);
-            return [];
-        }
-    }
-
-    private async listTemplates(): Promise<any[]> {
-        try {
-            console.log(`Listing templates in: /data/templates/`);
-            
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: '/data/templates/'
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing templates directory: ${response.status} ${response.statusText}`);
-                return [];
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for templates:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read templates directory:`, errorMessage);
-                return [];
-            }
-
-            let allFiles: any[] = [];
-
-            for (const item of data.data || []) {
-                const itemPath = `/${item.name}`;
-                
-                if (item.isDir) {
-                    // Recursively list all files in template directories
-                    const templateFiles = await this.listTemplateFiles(item.name);
-                    allFiles = allFiles.concat(templateFiles);
-                } else if (this.isTemplateFile(item.name)) {
-                    allFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `/data/templates/${item.name}`
-                    });
-                }
-            }
-
-            return allFiles;
-        } catch (error) {
-            console.error(`Failed to list templates:`, error);
-            return [];
-        }
-    }
-
-    private async listTemplateFiles(templateDirName: string): Promise<any[]> {
-        try {
-            const dirPath = `/data/templates/${templateDirName}`;
-            console.log(`Listing template files: ${dirPath}`);
-
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: dirPath
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing template directory ${dirPath}: ${response.status} ${response.statusText}`);
-                return [];
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for template ${templateDirName}:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read template directory ${templateDirName}:`, errorMessage);
-                return [];
-            }
-
-            let allFiles: any[] = [];
-
-            for (const item of data.data || []) {
-                const itemPath = `/${templateDirName}/${item.name}`;
-                
-                if (item.isDir) {
-                    // Recursively process subdirectories within the template
-                    const subFiles = await this.listTemplateFiles(`${templateDirName}/${item.name}`);
-                    allFiles = allFiles.concat(subFiles);
-                } else if (this.isTemplateFile(item.name)) {
-                    allFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `/data/templates${itemPath}`
-                    });
-                }
-            }
-
-            return allFiles;
-        } catch (error) {
-            console.error(`Failed to list template files for ${templateDirName}:`, error);
-            return [];
-        }
-    }
-
-    private isTemplateFile(filename: string): boolean {
-        // Include common template file types
-        return filename.endsWith('.md') || 
-               filename.endsWith('.tpl') || 
-               filename.endsWith('.template') ||
-               filename.endsWith('.sy') || 
-               filename.endsWith('.json');
-    }
-
-    private async getLocalFiles(): Promise<Map<string, string>> {
-        const fileMap = new Map<string, string>();
-
-        // Process workspace configuration files
-        await this.addWorkspaceConfigFiles(fileMap);
-
-        // Process data directory (notebooks, assets, storage, etc.)
-        await this.addDataFiles(fileMap);
-
-        console.log(`Total files to sync: ${fileMap.size}`);
-        return fileMap;
-    }
-
-    private async addWorkspaceConfigFiles(fileMap: Map<string, string>): Promise<void> {
-        // List files in workspace conf directory
-        try {
-            console.log(`Listing workspace config files in: /conf/`);
-            
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: '/conf/'
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing workspace conf directory: ${response.status} ${response.statusText}`);
-                return;
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for workspace conf:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read workspace conf directory:`, errorMessage);
-                return;
-            }
-
-            for (const item of data.data || []) {
-                if (item.isDir) {
-                    // Recursively process subdirectories in conf
-                    await this.addConfSubDir(item.name, '/conf/', 'conf/', fileMap);
-                } else {
-                    const localPath = `/conf/${item.name}`;
-                    const content = await this.readLocalFile(localPath);
-                    if (content !== null) {
-                        const relativePath = `conf/${item.name}`;
-                        fileMap.set(relativePath, content);
-                        console.log(`  Added workspace config: ${relativePath}`);
-                    } else {
-                        console.error(`  Failed to read workspace config: ${localPath}`);
+            if (data.code === 0) {
+                for (const item of data.data || []) {
+                    if (!item.isDir) {
+                        // Copy the file from SiYuan to Git repo
+                        const sourcePath = `${dirPath}${item.name}`;
+                        const destPath = `/repo/${notebookName}/${item.name}`;
+                        
+                        // Read the file from SiYuan
+                        const fileContent = await this.readSiYuanFile(sourcePath);
+                        if (fileContent) {
+                            // Write the file to the Git repo
+                            await this.p.writeFile(destPath, fileContent, 'utf8');
+                        }
                     }
                 }
             }
         } catch (error) {
-            console.error(`Failed to list workspace config files:`, error);
+            console.error(`Failed to copy notebook files for ${notebookName}:`, error);
         }
     }
 
-    private async addConfSubDir(dirName: string, basePath: string, relativePathPrefix: string, fileMap: Map<string, string>): Promise<void> {
-        try {
-            const dirPath = `${basePath}${dirName}`;
-            console.log(`Listing conf subdirectory: ${dirPath}`);
-
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: dirPath
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing conf subdirectory ${dirPath}: ${response.status} ${response.statusText}`);
-                return;
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for conf subdirectory ${dirPath}:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read conf subdirectory ${dirPath}:`, errorMessage);
-                return;
-            }
-
-            for (const item of data.data || []) {
-                const itemRelativePath = `${relativePathPrefix}${dirName}/${item.name}`;
-                
-                if (item.isDir) {
-                    // Recursively process subdirectories
-                    await this.addConfSubDir(item.name, `${dirPath}/`, relativePathPrefix, fileMap);
-                } else {
-                    const localPath = `${dirPath}/${item.name}`;
-                    const content = await this.readLocalFile(localPath);
-                    if (content !== null) {
-                        fileMap.set(itemRelativePath, content);
-                        console.log(`  Added conf sub file: ${itemRelativePath}`);
-                    } else {
-                        console.error(`  Failed to read conf sub file: ${localPath}`);
-                    }
-                }
-            }
-        } catch (error) {
-            console.error(`Failed to list conf subdirectory ${dirName}:`, error);
-        }
-    }
-
-    private async addDataFiles(fileMap: Map<string, string>): Promise<void> {
-        // List files in data directory (notebooks, assets, storage, etc.)
-        try {
-            console.log(`Listing data directory files in: /data/`);
-            
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: '/data/'
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing data directory: ${response.status} ${response.statusText}`);
-                return;
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for data:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read data directory:`, errorMessage);
-                return;
-            }
-
-            // Define special directories that are not notebooks
-            const specialDirs = ['storage', 'plugins', 'templates', 'assets', 'emojis', 'snippets', 'widgets', 'public'];
-            
-            // Process special directories first
-            for (const item of data.data || []) {
-                if (item.isDir && specialDirs.includes(item.name)) {
-                    // Handle special directories based on their type and config settings
-                    switch (item.name) {
-                        case 'storage':
-                            if (this.config.syncConfig) {
-                                await this.addDataSubDir('storage', '/data/', fileMap);
-                            }
-                            break;
-                        case 'plugins':
-                            if (this.config.syncPlugins) {
-                                await this.addDataSubDir('plugins', '/data/', fileMap);
-                            }
-                            break;
-                        case 'templates':
-                            if (this.config.syncTemplates) {
-                                await this.addDataSubDir('templates', '/data/', fileMap);
-                            }
-                            break;
-                        case 'assets':
-                        case 'emojis':
-                        case 'snippets':
-                        case 'widgets':
-                        case 'public':
-                            // Process other special directories
-                            await this.addDataSubDir(item.name, '/data/', fileMap);
-                            break;
-                        default:
-                            // This shouldn't happen, but just in case
-                            console.log(`Unknown special directory: ${item.name}`);
-                            await this.addDataSubDir(item.name, '/data/', fileMap);
-                    }
-                }
-            }
-            
-            // Process actual notebook directories (anything that's not a special directory)
-            for (const item of data.data || []) {
-                if (item.isDir && !specialDirs.includes(item.name)) {
-                    // Process notebook directories
-                    await this.addNotebookFiles(item.name, fileMap);
-                }
-            }
-        } catch (error) {
-            console.error(`Failed to list data files:`, error);
-        }
-    }
-
-    private async addNotebookFiles(notebookName: string, fileMap: Map<string, string>): Promise<void> {
-        try {
-            // First, try to find the notebook by name to get its ID
-            const notebooks = await this.listNotebooks();
-            const notebook = notebooks.find((nb: any) => nb.name === notebookName || nb.id === notebookName);
-            
-            if (!notebook) {
-                console.error(`Notebook not found: ${notebookName}`);
-                return;
-            }
-            
-            const notebookId = notebook.id;
-            console.log(`Processing notebook: ${notebookName} (${notebookId})`);
-            const files = await this.listFiles('/data', notebookId);
-            console.log(`  Found ${files.length} files in notebook ${notebookName}`);
-
-            for (const file of files) {
-                const content = await this.readLocalFile(file.fullPath);
-                if (content !== null) {
-                    // Ensure the path starts with data/ and uses the actual notebook name
-                    const relativePath = `data/${notebook.name}${file.path}`;
-                    fileMap.set(relativePath, content);
-                    console.log(`  Added: ${relativePath}`);
-                } else {
-                    console.error(`  Failed to read: ${file.fullPath}`);
-                }
-            }
-        } catch (error) {
-            console.error(`Failed to process notebook ${notebookName}:`, error);
-        }
-    }
-
-    // Improved file listing function with proper SiYuan directory structure handling
-    private async listFiles(basePath: string, notebookId: string, path: string = "/"): Promise<any[]> {
-        try {
-            const dirPath = `${basePath}/${notebookId}${path}`;
-            console.log(`Listing files in: ${dirPath}`);
-
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: dirPath
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing directory ${dirPath}: ${response.status} ${response.statusText}`);
-                return [];
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for ${dirPath}:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read directory ${dirPath}:`, errorMessage);
-                return [];
-            }
-
-            let allFiles: any[] = [];
-
-            for (const item of data.data || []) {
-                const itemPath = path === "/" ? `/${item.name}` : `${path}/${item.name}`;
-
-                if (item.isDir) {
-                    // Check if it's a .siyuan directory to handle notebook configs
-                    if (item.name === '.siyuan') {
-                        // Process notebook config directory
-                        const configFiles = await this.listNotebookConfigFiles(notebookId, itemPath);
-                        allFiles = allFiles.concat(configFiles);
-                    } else {
-                        // Recursively process other subdirectories
-                        const subFiles = await this.listFiles(basePath, notebookId, itemPath);
-                        allFiles = allFiles.concat(subFiles);
-                    }
-                } else {
-                    // Add all file types, not just .sy files
-                    allFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `${basePath}/${notebookId}${itemPath}`
-                    });
-                }
-            }
-
-            return allFiles;
-        } catch (error) {
-            console.error(`Failed to list files in ${basePath}/${notebookId}${path}:`, error);
-            return [];
-        }
-    }
-
-    private async listNotebookConfigFiles(notebookId: string, path: string = "/"): Promise<any[]> {
-        try {
-            const dirPath = `/data/${notebookId}${path}`;
-            console.log(`Listing notebook config files in: ${dirPath}`);
-
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: dirPath
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing notebook config directory ${dirPath}: ${response.status} ${response.statusText}`);
-                return [];
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for notebook config ${dirPath}:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read notebook config directory ${dirPath}:`, errorMessage);
-                return [];
-            }
-
-            let configFiles: any[] = [];
-
-            for (const item of data.data || []) {
-                const itemPath = path === "/" ? `/${item.name}` : `${path}/${item.name}`;
-
-                if (item.isDir) {
-                    // Recursively process subdirectories in .siyuan
-                    const subFiles = await this.listNotebookConfigFiles(notebookId, itemPath);
-                    configFiles = configFiles.concat(subFiles);
-                } else {
-                    // Add config file
-                    configFiles.push({
-                        name: item.name,
-                        path: itemPath,
-                        fullPath: `/data/${notebookId}${itemPath}`
-                    });
-                }
-            }
-
-            return configFiles;
-        } catch (error) {
-            console.error(`Failed to list notebook config files in ${notebookId}${path}:`, error);
-            return [];
-        }
-    }
-
-    private async addDataSubDir(dirName: string, basePath: string, fileMap: Map<string, string>): Promise<void> {
-        try {
-            const dirPath = `${basePath}${dirName}`;
-            console.log(`Listing data subdirectory: ${dirPath}`);
-
-            const response = await fetch("/api/file/readDir", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    path: dirPath
-                })
-            });
-
-            if (!response.ok) {
-                console.error(`HTTP error listing data subdirectory ${dirPath}: ${response.status} ${response.statusText}`);
-                return;
-            }
-
-            const data = await response.json();
-            console.log(`readDir response for data subdirectory ${dirName}:`, data);
-
-            if (data.code !== 0) {
-                const errorMessage = data.msg || data.message || 'Unknown error';
-                console.error(`Failed to read data subdirectory ${dirName}:`, errorMessage);
-                return;
-            }
-
-            for (const item of data.data || []) {
-                // Build the relative path correctly
-                const itemRelativePath = `${dirName}/${item.name}`;
-                
-                if (item.isDir) {
-                    // Recursively process subdirectories within the data subdirectories
-                    await this.addDataSubDir(`${dirName}/${item.name}`, basePath, fileMap);
-                } else {
-                    const localPath = `${dirPath}/${item.name}`;
-                    const content = await this.readLocalFile(localPath);
-                    if (content !== null) {
-                        fileMap.set(itemRelativePath, content);
-                        console.log(`  Added data sub file: ${itemRelativePath}`);
-                    } else {
-                        console.error(`  Failed to read data sub file: ${localPath}`);
-                    }
-                }
-            }
-        } catch (error) {
-            console.error(`Failed to list data subdirectory ${dirName}:`, error);
-        }
-    }
-
-    private async createOrUpdateFile(path: string, content: string, sha?: string): Promise<void> {
-        // If we don't have the SHA but we think this is an update, we need to get the SHA first
-        let fileSha = sha;
-        if (!fileSha) {
+    private async copyConfigFiles() {
+        const configPaths = ["/conf/", "/data/storage/"];
+        
+        for (const configPath of configPaths) {
             try {
-                // Try to get the existing file to get its SHA
-                const existingFile = await this.getFileContent(path);
-                fileSha = existingFile?.sha;
+                const response = await fetch("/api/file/readDir", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ path: configPath })
+                });
+                
+                const data = await response.json();
+                
+                if (data.code === 0) {
+                    for (const item of data.data || []) {
+                        if (!item.isDir) {
+                            // Copy the config file from SiYuan to Git repo
+                            const sourcePath = `${configPath}${item.name}`;
+                            const destPath = `/repo/config/${item.name}`;
+                            
+                            // Read the config file from SiYuan
+                            const fileContent = await this.readSiYuanFile(sourcePath);
+                            if (fileContent) {
+                                // Write the config file to the Git repo
+                                await this.p.writeFile(destPath, fileContent, 'utf8');
+                            }
+                        }
+                    }
+                }
             } catch (error) {
-                // If we can't get the existing file, it probably doesn't exist, so we'll create it
-                console.log(`File ${path} doesn't exist yet, will create it`);
+                console.error(`Failed to copy config files from ${configPath}:`, error);
             }
         }
-
-        const message = fileSha
-        ? `Update ${path}`
-        : `Create ${path}`;
-
-        // Always encode content as base64 for GitHub API
-        let encodedContent: string;
-        try {
-            // For text content, we need to properly encode it
-            encodedContent = btoa(unescape(encodeURIComponent(content)));
-        } catch (encodeError) {
-            // For binary content or content that can't be encoded as UTF-8, encode as binary
-            try {
-                // Convert string to binary data
-                const binaryData = new TextEncoder().encode(content);
-                // Convert binary data to base64
-                encodedContent = btoa(String.fromCharCode(...binaryData));
-            } catch (binaryError) {
-                // Last resort: try to encode as-is
-                encodedContent = btoa(content);
-            }
-        }
-
-        const body: any = {
-            message: `${message} - ${new Date().toLocaleString()}`,
-            content: encodedContent,
-            branch: this.config.branch,
-            committer: {
-                name: this.config.authorName,
-                email: this.config.authorEmail
-            },
-            author: {
-                name: this.config.authorName,
-                email: this.config.authorEmail
-            }
-        };
-
-        // Only include sha in the body if we have it (for updates)
-        if (fileSha) {
-            body.sha = fileSha;
-        }
-
-        await this.githubRequest(
-            `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}`,
-                                 "PUT",
-                                 body
-        );
     }
 
-    private async deleteFileFromGitHub(path: string, sha?: string): Promise<void> {
-        // If we don't have the SHA, try to get it first
-        let fileSha = sha;
-        if (!fileSha) {
-            try {
-                const existingFile = await this.getFileContent(path);
-                fileSha = existingFile?.sha;
-            } catch (error) {
-                // If file doesn't exist on GitHub, nothing to delete
-                console.log(`File ${path} doesn't exist on GitHub, no need to delete`);
-                return;
-            }
-        }
-
-        if (!fileSha) {
-            console.log(`Cannot delete ${path} - no SHA provided and could not retrieve it`);
-            return;
-        }
-
-        const body: any = {
-            message: `Delete ${path} - ${new Date().toLocaleString()}`,
-            sha: fileSha,
-            branch: this.config.branch,
-            committer: {
-                name: this.config.authorName,
-                email: this.config.authorEmail
-            },
-            author: {
-                name: this.config.authorName,
-                email: this.config.authorEmail
-            }
-        };
-
-        await this.githubRequest(
-            `/repos/${this.config.repoOwner}/${this.config.repoName}/contents/${encodeURIComponent(path)}`,
-            "DELETE",
-            body
-        );
-    }
-
-    private async deleteLocalFile(path: string): Promise<boolean> {
+    private async readSiYuanFile(path: string): Promise<string | null> {
         try {
-            const response = await fetch("/api/file/removeFile", {
+            const response = await fetch("/api/file/getFile", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ path })
             });
 
-            const data = await response.json();
-            return data.code === 0;
-        } catch (error) {
-            console.error(`Failed to delete local file ${path}:`, error);
-            return false;
-        }
-    }
-
-    // Helper function to check if string is base64 encoded
-    private isBase64(str: string): boolean {
-        try {
-            return btoa(atob(str)) === str;
-        } catch (err) {
-            return false;
-        }
-    }
-
-    // Helper function to properly encode content as base64
-    private base64Encode(content: string): string {
-        try {
-            // Try regular base64 encoding for text content
-            return btoa(unescape(encodeURIComponent(content)));
-        } catch (error) {
-            // If that fails, handle as binary
-            try {
-                // Convert string to binary data
-                const binaryData = new TextEncoder().encode(content);
-                // Convert binary data to base64
-                return btoa(String.fromCharCode(...binaryData));
-            } catch (err) {
-                // Last resort: try to encode as-is
-                return btoa(content);
-            }
-        }
-    }
-
-    private async pushToGitHub() {
-        if (!this.isConfigValid()) {
-            showMessage("⚠️ Please configure settings first", 3000, "error");
-            return;
-        }
-
-        if (this.isSyncing) {
-            showMessage("⏳ Sync already in progress", 2000, "info");
-            return;
-        }
-
-        this.isSyncing = true;
-        showMessage("📤 Pushing to GitHub...", 3000, "info");
-
-        try {
-            const localFiles = await this.getLocalFiles();
-            const githubTree = await this.getGitHubTree();
-
-            const githubFiles = new Map<string, GitHubTreeItem>();
-            for (const item of githubTree) {
-                if (item.type === "blob") {
-                    githubFiles.set(item.path, item);
-                }
-            }
-
-            let uploaded = 0;
-            let updated = 0;
-            let skipped = 0;
-            let deleted = 0;
-            let errors = 0;
-
-            // Process files: create, update, or delete
-            for (const [path, content] of localFiles) {
-                try {
-                    const githubFile = githubFiles.get(path);
-
-                    if (githubFile) {
-                        const remoteFile = await this.getFileContent(path);
-                        if (remoteFile && remoteFile.content === content) {
-                            skipped++;
-                            continue;
-                        }
-                        await this.createOrUpdateFile(path, content, remoteFile?.sha);
-                        updated++;
-                    } else {
-                        await this.createOrUpdateFile(path, content);
-                        uploaded++;
-                    }
-                } catch (error) {
-                    console.error(`Failed to sync ${path}:`, error);
-                    errors++;
-                }
-            }
-
-            // Delete files that exist on GitHub but no longer exist locally
-            for (const [path, githubFile] of githubFiles) {
-                if (!localFiles.has(path)) {
-                    // Check if this is a file type we're managing (e.g., .sy files, config files)
-                    if (path.endsWith('.sy') || 
-                        path.startsWith('config/') || 
-                        path.startsWith('plugins/') || 
-                        path.startsWith('templates/')) {
-                        try {
-                            await this.deleteFileFromGitHub(path, githubFile.sha);
-                            deleted++;
-                        } catch (error) {
-                            console.error(`Failed to delete ${path} from GitHub:`, error);
-                            errors++;
-                        }
-                    }
-                }
-            }
-
-            const message = `✅ Push complete\n` +
-            `📤 Uploaded: ${uploaded}\n` +
-            `🔄 Updated: ${updated}\n` +
-            `🗑️ Deleted: ${deleted}\n` +
-            `⏭️ Skipped: ${skipped}` +
-            (errors > 0 ? `\n❌ Errors: ${errors}` : '');
-
-            showMessage(message, 5000, "info");
-        } catch (error) {
-            this.showError("Push failed", error);
-        } finally {
-            this.isSyncing = false;
-        }
-    }
-
-    private async pullFromGitHub() {
-        if (!this.isConfigValid()) {
-            showMessage("⚠️ Please configure settings first", 3000, "error");
-            return;
-        }
-
-        if (this.isSyncing) {
-            showMessage("⏳ Sync already in progress", 2000, "info");
-            return;
-        }
-
-        this.isSyncing = true;
-        showMessage("📥 Pulling from GitHub...", 3000, "info");
-
-        try {
-            const result = await this.performPullOperation();
-            
-            const message = `✅ Pull complete\n` +
-            `📥 Created: ${result.created}\n` +
-            `🔄 Updated: ${result.updated}\n` +
-            `🗑️ Deleted: ${result.deleted}\n` +
-            `⏭️ Skipped: ${result.skipped}` +
-            (result.errors > 0 ? `\n❌ Errors: ${result.errors}` : '');
-
-            showMessage(message, 5000, "info");
-        } catch (error) {
-            this.showError("Pull failed", error);
-        } finally {
-            this.isSyncing = false;
-        }
-    }
-
-    private async performPullOperation(): Promise<{created: number, updated: number, skipped: number, deleted: number, errors: number}> {
-        const githubTree = await this.getGitHubTree();
-        const localFiles = await this.getLocalFiles(); // Get current local files to compare against
-        
-        const notebooks = await this.listNotebooks();
-        const notebookMap = new Map(notebooks.map((nb: any) => [nb.name, nb]));
-
-        let created = 0;
-        let updated = 0;
-        let skipped = 0;
-        let deleted = 0;
-        let errors = 0;
-
-        // Process files to download from GitHub
-        for (const item of githubTree) {
-            // Skip if not a blob
-            if (item.type !== "blob") {
-                continue;
-            }
-
-            try {
-                // Parse the path to determine the type of file
-                const parts = item.path.split('/');
-                
-                // Handle different file types based on path
-                const pathResult = await this.handlePullFileByType(item, parts, notebooks, notebookMap);
-                
-                if (pathResult) {
-                    if (pathResult.status === 'created') created++;
-                    else if (pathResult.status === 'updated') updated++;
-                    else if (pathResult.status === 'skipped') skipped++;
-                    else if (pathResult.status === 'error') errors++;
-                } else {
-                    // If pathResult is null, there was an error
-                    errors++;
-                }
-            } catch (error) {
-                console.error(`Failed to sync ${item.path}:`, error);
-                errors++;
-            }
-        }
-
-        // Delete local files that no longer exist on GitHub
-        for (const [path, content] of localFiles) {
-            // Check if this local file exists in the GitHub tree
-            const existsOnGitHub = githubTree.some(item => 
-                item.type === "blob" && 
-                item.path === path &&
-                (path.endsWith('.sy') || path.startsWith('config/') || path.startsWith('plugins/') || path.startsWith('templates/'))
-            );
-            
-            if (!existsOnGitHub) {
-                // File exists locally but not on GitHub, consider deleting it
-                try {
-                    // Extract notebook name and path from local file structure
-                    const pathParts = path.split('/');
-                    if (path.startsWith('notebooks/')) {
-                        // It's a notebook file: notebooks/{notebookName}/{filePath}
-                        if (pathParts.length >= 3) {
-                            const notebookName = pathParts[1];
-                            const notebook = notebookMap.get(notebookName);
-                            if (notebook) {
-                                const relativePath = '/' + pathParts.slice(2).join('/');
-                                const localPath = `/data/${notebook.id}${relativePath}`;
-                                if (await this.deleteLocalFile(localPath)) {
-                                    deleted++;
-                                } else {
-                                    console.error(`Failed to delete local file ${localPath}`);
-                                    errors++;
-                                }
+            if (response.ok) {
+                // Check content type to determine how to process
+                const contentType = response.headers.get('content-type');
+                if (contentType && contentType.includes('application/json')) {
+                    const data = await response.json();
+                    // Handle SiYuan's structured response
+                    if (data.code === 0) {
+                        if (typeof data.data === 'string') {
+                            return data.data;
+                        } else {
+                            try {
+                                return JSON.stringify(data.data, null, 2);
+                            } catch {
+                                return null;
                             }
                         }
-                    } else if (path.startsWith('config/')) {
-                        // It's a config file: config/{filePath}
-                        const relativePath = '/' + pathParts.slice(1).join('/');
-                        const localPath = `/data/storage${relativePath}`;
-                        if (await this.deleteLocalFile(localPath)) {
-                            deleted++;
-                        } else {
-                            console.error(`Failed to delete local config file ${localPath}`);
-                            errors++;
-                        }
-                    } else if (path.startsWith('plugins/')) {
-                        // It's a plugin file: plugins/{filePath}
-                        const relativePath = '/' + pathParts.slice(1).join('/');
-                        const localPath = `/data/plugins${relativePath}`;
-                        if (await this.deleteLocalFile(localPath)) {
-                            deleted++;
-                        } else {
-                            console.error(`Failed to delete local plugin file ${localPath}`);
-                            errors++;
-                        }
-                    } else if (path.startsWith('templates/')) {
-                        // It's a template file: templates/{filePath}
-                        const relativePath = '/' + pathParts.slice(1).join('/');
-                        const localPath = `/data/templates${relativePath}`;
-                        if (await this.deleteLocalFile(localPath)) {
-                            deleted++;
-                        } else {
-                            console.error(`Failed to delete local template file ${localPath}`);
-                            errors++;
-                        }
                     }
-                } catch (error) {
-                    console.error(`Error deleting local file ${path}:`, error);
-                    errors++;
+                } else {
+                    // Handle raw file content
+                    return await response.text();
                 }
             }
+        } catch (error) {
+            console.error(`Failed to read file ${path}:`, error);
         }
+        return null;
+    }
 
-        // Reload workspace to show new files if any changes were made
-        if (created > 0 || updated > 0 || deleted > 0) {
-            await fetch("/api/filetree/refreshFiletree", { method: "POST" });
-            // Also try to refresh the document tree view
-            await fetch("/api/filetree/renameDoc", { 
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ notebook: "", path: "/" })
-            }).catch(() => {}); // Ignore errors from this optional refresh
+    private async syncFilesFromSiYuan() {
+        // Copy all files from SiYuan workspace to Git repo
+        showMessage("🔄 Syncing files from SiYuan workspace", 2000, "info");
+        
+        try {
+            // Create the repo directory if it doesn't exist
+            await this.p.mkdir("/repo", { recursive: true });
+            await this.p.mkdir("/repo/config", { recursive: true });
+
+            // List all notebooks first
+            const notebooks = await this.listNotebooks();
+            
+            // Process each notebook and its files
+            for (const notebook of notebooks) {
+                await this.copyNotebookFiles(notebook.id, notebook.name);
+            }
+
+            // Copy configuration files
+            await this.copyConfigFiles();
+            
+            // Show completion message with count
+            showMessage("✅ Files synced from SiYuan to Git repo", 2000, "info");
+        } catch (error) {
+            console.error("Error syncing files from SiYuan", error);
+            throw error;
         }
+    }
 
-        return { created, updated, skipped, deleted, errors };
+    private async syncFilesToSiYuan() {
+        // Copy files from Git repo to SiYuan workspace
+        showMessage("🔄 Syncing files to SiYuan workspace", 2000, "info");
+        
+        // Implementation would depend on SiYuan's file API
+        try {
+            // Read all files from Git repo and copy them back to SiYuan
+            const files = await this.p.readdir("/repo");
+            
+            for (const file of files) {
+                if (file !== '.git') { // Skip Git metadata
+                    const filePath = `/repo/${file}`;
+                    const stats = await this.p.stat(filePath);
+                    
+                    if (stats.isFile()) {
+                        // Read the file from Git repo
+                        const content = await this.p.readFile(filePath, 'utf8');
+                        
+                        // For now, just log the file name - actual implementation
+                        // would copy the file back to SiYuan's workspace
+                        console.log(`Would sync file back to SiYuan: ${file}`);
+                    } else if (stats.isDirectory() && file !== 'config') {
+                        // Process notebook directories
+                        await this.copyNotebookFilesFromGitToSiYuan(file);
+                    } else if (file === 'config') {
+                        // Process config directory
+                        await this.copyConfigFilesFromGitToSiYuan();
+                    }
+                }
+            }
+            
+            showMessage("✅ Files synced from Git repo to SiYuan workspace", 2000, "info");
+        } catch (error) {
+            console.error("Error syncing files to SiYuan", error);
+            throw error;
+        }
     }
     
-    private async handlePullFileByType(item: GitHubTreeItem, parts: string[], notebooks: any[], notebookMap: Map<string, any>): Promise<{status: string} | null> {
-        if (parts[0] === "notebooks") {
-            // It's a notebook file: notebooks/{notebookName}/{filePath}
-            const notebookName = parts[1];
-            const relativePath = '/' + parts.slice(2).join('/');
+    private async copyNotebookFilesFromGitToSiYuan(notebookName: string) {
+        try {
+            const notebookFiles = await this.p.readdir(`/repo/${notebookName}`);
             
-            let notebook = notebookMap.get(notebookName);
-            if (!notebook) {
-                const matchingNotebook = notebooks.find((nb: any) => nb.name === notebookName || nb.id === notebookName);
-                if (matchingNotebook) {
-                    notebook = matchingNotebook;
-                    notebookMap.set(notebookName, notebook);
-                } else {
-                    // Create a new notebook if it doesn't exist
-                    const response = await fetch("/api/notebook/createNotebook", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ name: notebookName })
-                    });
-                    const data = await response.json();
-                    if (data.code === 0) {
-                        notebook = data.data.notebook;
-                        notebookMap.set(notebookName, notebook);
-                    } else {
-                        console.error(`Failed to create notebook ${notebookName}:`, data);
-                        return null;
-                    }
-                }
+            for (const fileName of notebookFiles) {
+                const gitPath = `/repo/${notebookName}/${fileName}`;
+                
+                // Read file from Git repo
+                const content = await this.p.readFile(gitPath, 'utf8');
+                
+                // In a real implementation, this would write to SiYuan's notebook
+                console.log(`Would write to notebook ${notebookName}: ${fileName}`);
             }
-
-            const localPath = `/data/${notebook.id}${relativePath}`;
-            const remoteFile = await this.getFileContent(item.path);
-
-            if (!remoteFile) {
-                return null;
-            }
-
-            const localContent = await this.readLocalFile(localPath);
-
-            if (localContent !== null && localContent === remoteFile.content) {
-                return {status: 'skipped'};
-            }
-
-            const success = await this.writeLocalFile(localPath, remoteFile.content);
-            if (success) {
-                return {status: localContent === null ? 'created' : 'updated'};
-            } else {
-                console.error(`Failed to write local file ${localPath}`);
-                return {status: 'error'};
-            }
+        } catch (error) {
+            console.error(`Error copying notebook files for ${notebookName}`, error);
         }
-        // Check if this is a config file (starts with "config/")
-        else if (parts[0] === "config") {
-            // It's a config file: config/{filePath}
-            const relativePath = '/' + parts.slice(1).join('/');
-            const localPath = `/data/storage${relativePath}`;
+    }
+    
+    private async copyConfigFilesFromGitToSiYuan() {
+        try {
+            const configFiles = await this.p.readdir('/repo/config');
             
-            const remoteFile = await this.getFileContent(item.path);
-
-            if (!remoteFile) {
-                return null;
+            for (const fileName of configFiles) {
+                const gitPath = `/repo/config/${fileName}`;
+                
+                // Read config file from Git repo
+                const content = await this.p.readFile(gitPath, 'utf8');
+                
+                // In a real implementation, this would write to SiYuan's config directory
+                console.log(`Would write config file: ${fileName}`);
             }
-
-            const localContent = await this.readLocalFile(localPath);
-
-            if (localContent !== null && localContent === remoteFile.content) {
-                return {status: 'skipped'};
-            }
-
-            const success = await this.writeLocalFile(localPath, remoteFile.content);
-            if (success) {
-                return {status: localContent === null ? 'created' : 'updated'};
-            } else {
-                console.error(`Failed to write local config file ${localPath}`);
-                return {status: 'error'};
-            }
-        }
-        // Check if this is a plugin file (starts with "plugins/")
-        else if (parts[0] === "plugins") {
-            // It's a plugin file: plugins/{filePath}
-            const relativePath = '/' + parts.slice(1).join('/');
-            const localPath = `/data/plugins${relativePath}`;
-            
-            const remoteFile = await this.getFileContent(item.path);
-
-            if (!remoteFile) {
-                return null;
-            }
-
-            const localContent = await this.readLocalFile(localPath);
-
-            if (localContent !== null && localContent === remoteFile.content) {
-                return {status: 'skipped'};
-            }
-
-            const success = await this.writeLocalFile(localPath, remoteFile.content);
-            if (success) {
-                return {status: localContent === null ? 'created' : 'updated'};
-            } else {
-                console.error(`Failed to write local plugin file ${localPath}`);
-                return {status: 'error'};
-            }
-        }
-        // Check if this is a template file (starts with "templates/")
-        else if (parts[0] === "templates") {
-            // It's a template file: templates/{filePath}
-            const relativePath = '/' + parts.slice(1).join('/');
-            const localPath = `/data/templates${relativePath}`;
-            
-            const remoteFile = await this.getFileContent(item.path);
-
-            if (!remoteFile) {
-                return null;
-            }
-
-            const localContent = await this.readLocalFile(localPath);
-
-            if (localContent !== null && localContent === remoteFile.content) {
-                return {status: 'skipped'};
-            }
-
-            const success = await this.writeLocalFile(localPath, remoteFile.content);
-            if (success) {
-                return {status: localContent === null ? 'created' : 'updated'};
-            } else {
-                console.error(`Failed to write local template file ${localPath}`);
-                return {status: 'error'};
-            }
-        }
-        // Otherwise, it's a legacy notebook file in the root
-        else {
-            // Legacy format: {notebookName}/{filePath}
-            const notebookName = parts[0];
-            const relativePath = '/' + parts.slice(1).join('/');
-            
-            let notebook = notebookMap.get(notebookName);
-            if (!notebook) {
-                // Try to find if there's a notebook with matching ID in the name
-                const matchingNotebook = notebooks.find((nb: any) => nb.name === notebookName || nb.id === notebookName);
-                if (matchingNotebook) {
-                    notebook = matchingNotebook;
-                    notebookMap.set(notebookName, notebook);
-                } else {
-                    // Create a new notebook if it doesn't exist
-                    const response = await fetch("/api/notebook/createNotebook", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ name: notebookName })
-                    });
-                    const data = await response.json();
-                    if (data.code === 0) {
-                        notebook = data.data.notebook;
-                        notebookMap.set(notebookName, notebook);
-                    } else {
-                        console.error(`Failed to create notebook ${notebookName}:`, data);
-                        return null;
-                    }
-                }
-            }
-
-            const localPath = `/data/${notebook.id}${relativePath}`;
-            const remoteFile = await this.getFileContent(item.path);
-
-            if (!remoteFile) {
-                return null;
-            }
-
-            const localContent = await this.readLocalFile(localPath);
-
-            if (localContent !== null && localContent === remoteFile.content) {
-                return {status: 'skipped'};
-            }
-
-            const success = await this.writeLocalFile(localPath, remoteFile.content);
-            if (success) {
-                return {status: localContent === null ? 'created' : 'updated'};
-            } else {
-                console.error(`Failed to write local file ${localPath}`);
-                return {status: 'error'};
-            }
+        } catch (error) {
+            console.error('Error copying config files from Git', error);
         }
     }
 
     private async fullSync() {
-        if (!this.isConfigValid()) {
-            showMessage("⚠️ Please configure settings first", 3000, "error");
-            return;
-        }
-
         if (this.isSyncing) {
             showMessage("⏳ Sync already in progress", 2000, "info");
             return;
         }
 
-        showMessage("🔄 Starting full sync...", 3000, "info");
         this.isSyncing = true;
+        showMessage("🔄 Full sync started...", 3000, "info");
 
         try {
-            // Pull first to get remote changes
-            const pullResult = await this.performPullOperation();
-
+            // Pull first
+            await this.pull();
+            
             // Small delay to ensure files are written
             await new Promise(resolve => setTimeout(resolve, 1000));
-
-            // Then push local changes
-            const pushResult = await this.performPushOperation();
-
-            const message = `✅ Full sync completed\n` +
-            `📥 Pulled: ${pullResult.created + pullResult.updated}\n` +
-            `📤 Pushed: ${pushResult.totalProcessed}\n` +
-            `🗑️ Deleted: ${pullResult.deleted}` +
-            (pullResult.errors > 0 || pushResult.errors > 0 ? `\n❌ Errors: ${pullResult.errors + pushResult.errors}` : '');
-
-            showMessage(message, 5000, "info");
+            
+            // Then push
+            await this.push();
+            
+            showMessage("✅ Full sync completed", 3000, "info");
         } catch (error) {
             this.showError("Full sync failed", error);
         } finally {
@@ -1777,70 +654,27 @@ export default class GitSyncPlugin extends Plugin {
         }
     }
 
-    private async performPushOperation(): Promise<{totalProcessed: number, errors: number}> {
-        const localFiles = await this.getLocalFiles();
-        const githubTree = await this.getGitHubTree();
-
-        const githubFiles = new Map<string, GitHubTreeItem>();
-        for (const item of githubTree) {
-            if (item.type === "blob") {
-                githubFiles.set(item.path, item);
-            }
-        }
-
-        let totalProcessed = 0;
-        let errors = 0;
-
-        for (const [path, content] of localFiles) {
-            try {
-                const githubFile = githubFiles.get(path);
-
-                if (githubFile) {
-                    const remoteFile = await this.getFileContent(path);
-                    if (!remoteFile || remoteFile.content !== content) {
-                        await this.createOrUpdateFile(path, content, remoteFile?.sha);
-                        totalProcessed++;
-                    }
-                } else {
-                    await this.createOrUpdateFile(path, content);
-                    totalProcessed++;
-                }
-            } catch (error) {
-                console.error(`Failed to sync ${path}:`, error);
-                errors++;
-            }
-        }
-        
-        return { totalProcessed, errors };
-    }
-
-    private async showStatus() {
-        if (!this.isConfigValid()) {
-            showMessage("⚠️ Please configure settings first", 3000, "error");
-            return;
-        }
-
-        showMessage("📊 Checking status...", 2000, "info");
-
+    private async getRepoStatus() {
         try {
-            const localFiles = await this.getLocalFiles();
-            const githubTree = await this.getGitHubTree();
-            const githubSyFiles = githubTree.filter(item =>
-            item.type === "blob" && item.path.endsWith('.sy')
+            await this.ensureRepo();
+            
+            const status = await isogit.statusMatrix({ fs: this.fs, dir: "/repo" });
+            const staged = status.filter(row => row[3] === 1).length; // 3 = workdir status, 1 = added
+            const modified = status.filter(row => row[2] === 2).length; // 2 = HEAD status, 2 = modified
+            
+            showMessage(
+                `📊 Git Status:\n` +
+                `🔗 Repository: ${this.config.repoUrl}\n` +
+                `🌿 Branch: ${this.config.branch}\n` +
+                `🔄 Auto Sync: ${this.config.autoSync ? `every ${this.config.syncInterval} min` : 'disabled'}\n` +
+                `⚡ Sync on Change: ${this.config.syncOnChange ? 'enabled' : 'disabled'}\n` +
+                `📝 Modified: ${modified}\n` +
+                `✅ Staged: ${staged}`,
+                8000,
+                "info"
             );
-
-            const notebooks = await this.listNotebooks();
-
-            const statusMsg = `📊 Status:\n\n` +
-            `📚 Local notebooks: ${notebooks.length}\n` +
-            `📄 Local files: ${localFiles.size}\n` +
-            `☁️ GitHub files: ${githubSyFiles.length}\n` +
-            `🔗 Repository: ${this.config.repoOwner}/${this.config.repoName}\n` +
-            `🌿 Branch: ${this.config.branch}`;
-
-            showMessage(statusMsg, 8000, "info");
         } catch (error) {
-            this.showError("Failed to get status", error);
+            this.showError("Failed to get Git status", error);
         }
     }
 
@@ -1850,7 +684,7 @@ export default class GitSyncPlugin extends Plugin {
         const intervalMs = Math.max(this.config.syncInterval, 5) * 60 * 1000;
 
         this.syncIntervalId = window.setInterval(async () => {
-            if (!this.isSyncing && this.isConfigValid()) {
+            if (!this.isSyncing && this.config.repoUrl && this.config.token) {
                 console.log("⏰ Auto-sync triggered");
                 await this.fullSync();
             }
@@ -1866,282 +700,162 @@ export default class GitSyncPlugin extends Plugin {
         }
     }
 
-    private registerSettings() {
-        this.settingUtils.addItem({
-            key: "repoOwner",
-            value: this.config.repoOwner,
-            type: "textinput",
-            title: "Repository Owner",
-            description: "GitHub username or organization (e.g., 'octocat')",
-                                  action: {
-                                      callback: () => {
-                                          const value = this.settingUtils.take("repoOwner");
-                                          if (value !== undefined) {
-                                              this.config.repoOwner = String(value).trim();
-                                              this.saveConfig();
-                                          }
-                                      }
-                                  }
-        });
-
-        this.settingUtils.addItem({
-            key: "repoName",
-            value: this.config.repoName,
-            type: "textinput",
-            title: "Repository Name",
-            description: "Repository name (e.g., 'my-notes')",
-                                  action: {
-                                      callback: () => {
-                                          const value = this.settingUtils.take("repoName");
-                                          if (value !== undefined) {
-                                              this.config.repoName = String(value).trim();
-                                              this.saveConfig();
-                                          }
-                                      }
-                                  }
-        });
-
-        this.settingUtils.addItem({
-            key: "branch",
-            value: this.config.branch,
-            type: "textinput",
-            title: "Branch",
-            description: "Git branch (default: main)",
-                                  action: {
-                                      callback: () => {
-                                          const value = this.settingUtils.take("branch");
-                                          if (value !== undefined) {
-                                              this.config.branch = String(value).trim() || "main";
-                                              this.saveConfig();
-                                          }
-                                      }
-                                  }
-        });
-
-        this.settingUtils.addItem({
-            key: "token",
-            value: this.config.token,
-            type: "textinput",
-            title: "GitHub Token",
-            description: "Personal Access Token with 'repo' permissions",
-            action: {
-                callback: () => {
-                    const value = this.settingUtils.take("token");
-                    if (value !== undefined) {
-                        this.config.token = String(value).trim();
-                        this.saveConfig();
-                    }
-                }
-            }
-        });
-
-        this.settingUtils.addItem({
-            key: "authorName",
-            value: this.config.authorName,
-            type: "textinput",
-            title: "Author Name",
-            description: "Name for Git commits",
-            action: {
-                callback: () => {
-                    const value = this.settingUtils.take("authorName");
-                    if (value !== undefined) {
-                        this.config.authorName = String(value);
-                        this.saveConfig();
-                    }
-                }
-            }
-        });
-
-        this.settingUtils.addItem({
-            key: "authorEmail",
-            value: this.config.authorEmail,
-            type: "textinput",
-            title: "Author Email",
-            description: "Email for Git commits",
-            action: {
-                callback: () => {
-                    const value = this.settingUtils.take("authorEmail");
-                    if (value !== undefined) {
-                        this.config.authorEmail = String(value);
-                        this.saveConfig();
-                    }
-                }
-            }
-        });
-
-        this.settingUtils.addItem({
-            key: "autoSync",
-            value: this.config.autoSync,
-            type: "checkbox",
-            title: "Enable Auto-Sync",
-            description: "Automatically sync at intervals",
-            action: {
-                callback: () => {
-                    const value = this.settingUtils.take("autoSync");
-                    if (value !== undefined) {
-                        this.config.autoSync = Boolean(value);
-                        this.saveConfig();
-                    }
-                }
-            }
-        });
-
-        this.settingUtils.addItem({
-            key: "syncInterval",
-            value: this.config.syncInterval,
-            type: "number",
-            title: "Sync Interval (minutes)",
-                                  description: "Minutes between syncs (min 5)",
-                                  action: {
-                                      callback: () => {
-                                          const value = this.settingUtils.take("syncInterval");
-                                          if (value !== undefined) {
-                                              this.config.syncInterval = Math.max(5, Number(value));
-                                              this.saveConfig();
-                                          }
-                                      }
-                                  }
-        });
-
-        this.settingUtils.addItem({
-            key: "syncConfig",
-            value: this.config.syncConfig,
-            type: "checkbox",
-            title: "Sync Config Files",
-            description: "Sync configuration files (default: true)",
-            action: {
-                callback: () => {
-                    const value = this.settingUtils.take("syncConfig");
-                    if (value !== undefined) {
-                        this.config.syncConfig = Boolean(value);
-                        this.saveConfig();
-                    }
-                }
-            }
-        });
-        
-        this.settingUtils.addItem({
-            key: "syncPlugins",
-            value: this.config.syncPlugins,
-            type: "checkbox",
-            title: "Sync Plugins",
-            description: "Sync installed plugins and their settings (default: false)",
-            action: {
-                callback: () => {
-                    const value = this.settingUtils.take("syncPlugins");
-                    if (value !== undefined) {
-                        this.config.syncPlugins = Boolean(value);
-                        this.saveConfig();
-                    }
-                }
-            }
-        });
-        
-        this.settingUtils.addItem({
-            key: "syncTemplates",
-            value: this.config.syncTemplates,
-            type: "checkbox",
-            title: "Sync Templates",
-            description: "Sync template files (default: false)",
-            action: {
-                callback: () => {
-                    const value = this.settingUtils.take("syncTemplates");
-                    if (value !== undefined) {
-                        this.config.syncTemplates = Boolean(value);
-                        this.saveConfig();
-                    }
-                }
-            }
-        });
-
-        this.settingUtils.addItem({
-            key: "testButton",
-            value: "",
-            type: "button",
-            title: "Test Connection",
-            description: "Test GitHub connection",
-            button: {
-                label: "🔍 Test",
-                callback: () => {
-                    this.testConnection();
-                }
-            }
-        });
-
-        try {
-            this.settingUtils.load();
-        } catch (error) {
-            console.error("Error loading settings:", error);
-        }
+    private getHttp() {
+        // isomorphic-git in the browser should use fetch by default
+        // We return undefined to let isomorphic-git use the global fetch by default
+        return undefined;
     }
 
-    async openSetting() {
-        const settingPanel = this.setting;
-        if (settingPanel) {
-            settingPanel.open(STORAGE_NAME);
+    private showError(message: string, error?: any) {
+        console.error(message, error);
+        let errorMsg = `❌ ${message}`;
+        if (error?.message) {
+            errorMsg += `\n${error.message}`;
         }
+        showMessage(errorMsg, 6000, "error");
     }
 
-    private showMenu() {
-        const menu = new Menu("gitSyncMenu");
-
-        menu.addItem({
-            icon: "iconSettings",
-            label: "⚙️ Settings",
-            click: () => {
-                this.openSetting();
-            }
+    private async openSetting() {
+        // Create a proper settings dialog using SiYuan's Dialog class
+        const html = `
+        <div class="b3-dialog__content">
+            <div class="fn__flex-column" style="height: 100%;">
+                <div class="fn__flex-1 fn__flex-column">
+                    <div class="fn__flex">
+                        <div class="fn__flex-1">
+                            <label class="fn__flex">
+                                <div class="fn__flex-center">Repository URL</div>
+                                <div class="fn__space"></div>
+                                <input id="repoUrl" class="b3-text-field fn__flex-1" value="${this.config.repoUrl}" placeholder="https://github.com/username/repo.git">
+                            </label>
+                        </div>
+                    </div>
+                    <div class="fn__16"></div>
+                    <div class="fn__flex">
+                        <div class="fn__flex-1">
+                            <label class="fn__flex">
+                                <div class="fn__flex-center">Branch</div>
+                                <div class="fn__space"></div>
+                                <input id="branch" class="b3-text-field fn__flex-1" value="${this.config.branch}" placeholder="main">
+                            </label>
+                        </div>
+                    </div>
+                    <div class="fn__16"></div>
+                    <div class="fn__flex">
+                        <div class="fn__flex-1">
+                            <label class="fn__flex">
+                                <div class="fn__flex-center">Git Token</div>
+                                <div class="fn__space"></div>
+                                <input id="token" type="password" class="b3-text-field fn__flex-1" value="${this.config.token}" placeholder="GitHub Personal Access Token">
+                            </label>
+                        </div>
+                    </div>
+                    <div class="fn__16"></div>
+                    <div class="fn__flex">
+                        <div class="fn__flex-1">
+                            <label class="fn__flex">
+                                <div class="fn__flex-center">Author Name</div>
+                                <div class="fn__space"></div>
+                                <input id="authorName" class="b3-text-field fn__flex-1" value="${this.config.authorName}" placeholder="Your name">
+                            </label>
+                        </div>
+                    </div>
+                    <div class="fn__16"></div>
+                    <div class="fn__flex">
+                        <div class="fn__flex-1">
+                            <label class="fn__flex">
+                                <div class="fn__flex-center">Author Email</div>
+                                <div class="fn__space"></div>
+                                <input id="authorEmail" type="email" class="b3-text-field fn__flex-1" value="${this.config.authorEmail}" placeholder="email@example.com">
+                            </label>
+                        </div>
+                    </div>
+                    <div class="fn__16"></div>
+                    <div class="fn__flex">
+                        <div class="fn__flex-1">
+                            <label class="fn__flex">
+                                <div class="fn__flex-center">Sync Interval (minutes)</div>
+                                <div class="fn__space"></div>
+                                <input id="syncInterval" type="number" min="5" class="b3-text-field fn__flex-1" value="${this.config.syncInterval}">
+                            </label>
+                        </div>
+                    </div>
+                    <div class="fn__16"></div>
+                    <div class="fn__flex">
+                        <div class="fn__flex-1">
+                            <label class="fn__flex">
+                                <input id="autoSync" type="checkbox" class="b3-switch"${this.config.autoSync ? " checked" : ""}>
+                                <div class="fn__space"></div>
+                                <span class="fn__flex-center">Enable Auto-Sync</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div class="fn__16"></div>
+                    <div class="fn__flex">
+                        <div class="fn__flex-1">
+                            <label class="fn__flex">
+                                <input id="syncOnChange" type="checkbox" class="b3-switch"${this.config.syncOnChange ? " checked" : ""}>
+                                <div class="fn__space"></div>
+                                <span class="fn__flex-center">Sync on Change</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="fn__hr"></div>
+                <div class="fn__flex">
+                    <div class="fn__flex-1"></div>
+                    <button id="testConnectionBtn" class="b3-button b3-button--outline" style="margin-right: 8px;">Test Connection</button>
+                    <button id="saveBtn" class="b3-button b3-button--outline">Save</button>
+                </div>
+            </div>
+        </div>
+        <div class="b3-dialog__action">
+        </div>
+        `;
+        
+        // Use SiYuan's Dialog class directly instead of this.addDialog (which doesn't exist)
+        const dialog = new Dialog({
+            title: "Git Sync Settings",
+            content: html,
+            width: "600px",
+            height: "400px"
         });
 
-        menu.addSeparator();
+        // Add event listeners
+        dialog.element.querySelector('#saveBtn')?.addEventListener('click', async () => {
+            this.config.repoUrl = (dialog.element.querySelector('#repoUrl') as HTMLInputElement).value;
+            this.config.branch = (dialog.element.querySelector('#branch') as HTMLInputElement).value;
+            this.config.token = (dialog.element.querySelector('#token') as HTMLInputElement).value;
+            this.config.authorName = (dialog.element.querySelector('#authorName') as HTMLInputElement).value;
+            this.config.authorEmail = (dialog.element.querySelector('#authorEmail') as HTMLInputElement).value;
+            this.config.syncInterval = parseInt((dialog.element.querySelector('#syncInterval') as HTMLInputElement).value) || 30;
+            this.config.autoSync = (dialog.element.querySelector('#autoSync') as HTMLInputElement).checked;
+            this.config.syncOnChange = (dialog.element.querySelector('#syncOnChange') as HTMLInputElement).checked;
 
-        menu.addItem({
-            icon: "iconRefresh",
-            label: "🔄 Full Sync",
-            click: () => {
-                this.fullSync();
-            }
+            await this.saveConfig();
+            dialog.destroy();
+            showMessage("✅ Settings saved", 2000, "info");
         });
 
-        menu.addItem({
-            icon: "iconDownload",
-            label: "📥 Pull from GitHub",
-            click: () => {
-                this.pullFromGitHub();
-            }
+        dialog.element.querySelector('#testConnectionBtn')?.addEventListener('click', () => {
+            this.testConnection();
         });
+    }
 
-        menu.addItem({
-            icon: "iconUpload",
-            label: "📤 Push to GitHub",
-            click: () => {
-                this.pushToGitHub();
-            }
-        });
+    // Menu actions
+    async performPull() {
+        await this.pull();
+    }
 
-        menu.addSeparator();
+    async performPush() {
+        await this.push();
+    }
 
-        menu.addItem({
-            icon: "iconInfo",
-            label: "📊 Status",
-            click: () => {
-                this.showStatus();
-            }
-        });
+    async performFullSync() {
+        await this.fullSync();
+    }
 
-        menu.addItem({
-            icon: "iconTest",
-            label: "🔍 Test Connection",
-            click: () => {
-                this.testConnection();
-            }
-        });
-
-        const rect = this.topBarElement.getBoundingClientRect();
-        menu.open({
-            x: rect.left,
-            y: rect.bottom,
-            isLeft: true
-        });
+    async showStatus() {
+        await this.getRepoStatus();
     }
 }

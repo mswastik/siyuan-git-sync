@@ -20,9 +20,13 @@ export default defineConfig({
       ]
     })
   ],
+  define: {
+    global: "globalThis",
+  },
   resolve: {
     alias: {
-      "~": resolve(__dirname, "src")
+      "~": resolve(__dirname, "src"),
+      buffer: "buffer"
     }
   },
   build: {
@@ -35,11 +39,12 @@ export default defineConfig({
       formats: ["cjs"]
     },
     rollupOptions: {
-      external: ["siyuan", "fs", "path", "child_process", "crypto", "events", "os", "stream", "util"],
+      external: ["siyuan", "fs", "path", "child_process", "crypto", "events", "os", "stream", "util", "buffer"],
       output: {
         entryFileNames: "index.js",
         format: "cjs",
-        exports: "default"
+        exports: "default",
+        manualChunks: () => "index" // Force everything into one chunk
       }
     },
     minify: false,
