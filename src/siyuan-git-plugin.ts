@@ -3,9 +3,11 @@
  * Syncs your workspace with Git repositories using isomorphic-git
  */
 
-import { Dialog, Plugin, showMessage } from "siyuan";
+import { Plugin, showMessage, Menu } from "siyuan";
 import * as isogit from "isomorphic-git";
+import http from "isomorphic-git/http/web";
 import { Buffer } from "buffer";
+import { SettingUtils } from "./libs/setting-utils";
 
 // Make sure Buffer is available for isomorphic-git in browser
 if (typeof window !== "undefined" && !(window as any).Buffer) {
@@ -40,6 +42,7 @@ export default class GitSyncPlugin extends Plugin {
     private syncIntervalId: number | null = null;
     private changeDebounceTimer: number | null = null;
     private isSyncing = false;
+    private settingUtils: SettingUtils;
 
     async onload() {
         console.log("Loading Git Sync Plugin with isomorphic-git");
@@ -51,6 +54,167 @@ export default class GitSyncPlugin extends Plugin {
         // Initialize LightningFS
         this.fs = new LightningFS("siyuan-git");
         this.p = this.fs.promises;
+
+        // Initialize SettingUtils
+        this.settingUtils = new SettingUtils({
+            plugin: this,
+            name: "git-sync-config"
+        });
+
+        // Add settings items using SettingUtils
+        this.settingUtils.addItem({
+            key: "repoUrl",
+            value: this.config.repoUrl,
+            type: "textinput",
+            title: "Repository URL",
+            description: "URL of your Git repository (e.g. https://github.com/username/repo.git)",
+            action: {
+                callback: async () => {
+                    this.config.repoUrl = this.settingUtils.get("repoUrl");
+                    if (this.config.autoSync && this.config.repoUrl && this.config.token) {
+                        this.startAutoSync();
+                    } else {
+                        this.stopAutoSync();
+                    }
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "branch",
+            value: this.config.branch,
+            type: "textinput",
+            title: "Branch",
+            description: "Git branch to sync with (e.g. main, master)",
+            action: {
+                callback: async () => {
+                    this.config.branch = this.settingUtils.get("branch");
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "token",
+            value: this.config.token,
+            type: "textinput", 
+            title: "Git Token",
+            description: "Personal Access Token for Git repository (leave empty if not using authentication)",
+            action: {
+                callback: async () => {
+                    this.config.token = this.settingUtils.get("token");
+                    if (this.config.autoSync && this.config.repoUrl && this.config.token) {
+                        this.startAutoSync();
+                    } else {
+                        this.stopAutoSync();
+                    }
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "authorName",
+            value: this.config.authorName,
+            type: "textinput",
+            title: "Author Name",
+            description: "Name to use for Git commits",
+            action: {
+                callback: async () => {
+                    this.config.authorName = this.settingUtils.get("authorName");
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "authorEmail",
+            value: this.config.authorEmail,
+            type: "textinput",
+            title: "Author Email",
+            description: "Email to use for Git commits",
+            action: {
+                callback: async () => {
+                    this.config.authorEmail = this.settingUtils.get("authorEmail");
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "syncInterval",
+            value: this.config.syncInterval,
+            type: "slider",
+            title: "Sync Interval (minutes)",
+            description: "Interval for automatic sync in minutes (minimum 5 minutes)",
+            slider: {
+                min: 5,
+                max: 120,
+                step: 5,
+            },
+            action: {
+                callback: async () => {
+                    this.config.syncInterval = this.settingUtils.get("syncInterval");
+                    if (this.config.autoSync && this.config.repoUrl && this.config.token) {
+                        this.startAutoSync();
+                    }
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "autoSync",
+            value: this.config.autoSync,
+            type: "checkbox",
+            title: "Enable Auto-Sync",
+            description: "Automatically sync changes at the specified interval",
+            action: {
+                callback: async () => {
+                    this.config.autoSync = this.settingUtils.get("autoSync");
+                    if (this.config.autoSync && this.config.repoUrl && this.config.token) {
+                        this.startAutoSync();
+                    } else {
+                        this.stopAutoSync();
+                    }
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "syncOnChange",
+            value: this.config.syncOnChange,
+            type: "checkbox",
+            title: "Sync on Change",
+            description: "Automatically sync when documents are saved",
+            action: {
+                callback: async () => {
+                    this.config.syncOnChange = this.settingUtils.get("syncOnChange");
+                    if (this.config.syncOnChange) {
+                        this.startChangeMonitoring();
+                    } else {
+                        this.stopChangeMonitoring();
+                    }
+                    await this.saveConfig();
+                }
+            }
+        });
+
+        this.settingUtils.addItem({
+            key: "testConnection",
+            value: "",
+            type: "button",
+            title: "Test Connection",
+            description: "Test connection to your Git repository",
+            button: {
+                label: "Test Connection",
+                callback: () => {
+                    this.testConnection();
+                }
+            }
+        });
 
         await this.loadConfig();
         this.addTopBarIcon();
@@ -82,6 +246,11 @@ export default class GitSyncPlugin extends Plugin {
             if (savedConfig) {
                 this.config = { ...this.config, ...savedConfig };
                 console.log("Config loaded successfully");
+                
+                // Also update SettingUtils with loaded values to ensure UI is in sync
+                for (const [key, value] of Object.entries(savedConfig)) {
+                    this.settingUtils.set(key, value);
+                }
             }
         } catch (e) {
             console.error("Failed to load config:", e);
@@ -112,8 +281,57 @@ export default class GitSyncPlugin extends Plugin {
             icon: "iconCloud",
             title: "Git Sync",
             position: "right",
-            callback: () => {
-                this.openSetting();
+            callback: (event: MouseEvent) => {
+                // Create a dropdown menu for Git Sync actions using the Menu class import
+                const menu = new Menu();
+                
+                menu.addItem({
+                    icon: "iconSettings",
+                    label: "Settings",
+                    click: () => {
+                        this.openSetting();
+                    }
+                });
+                
+                menu.addItem({
+                    icon: "iconDownload",
+                    label: "Pull from Git",
+                    click: async () => {
+                        await this.performPull();
+                    }
+                });
+                
+                menu.addItem({
+                    icon: "iconUpload",
+                    label: "Push to Git",
+                    click: async () => {
+                        await this.performPush();
+                    }
+                });
+                
+                menu.addItem({
+                    icon: "iconRefresh",
+                    label: "Full Sync",
+                    click: async () => {
+                        await this.performFullSync();
+                    }
+                });
+                
+                menu.addItem({
+                    icon: "iconInfo",
+                    label: "Show Status",
+                    click: async () => {
+                        await this.showStatus();
+                    }
+                });
+                
+                // Position the menu near the clicked icon
+                const rect = (event.target as HTMLElement).getBoundingClientRect();
+                menu.open({
+                    x: rect.left, 
+                    y: rect.bottom,
+                    h: rect.height
+                });
             }
         });
     }
@@ -162,8 +380,12 @@ export default class GitSyncPlugin extends Plugin {
     }
 
     private async testConnection() {
-        if (!this.config.repoUrl || !this.config.token) {
-            showMessage("⚠️ Please configure repository URL and token", 3000, "error");
+        // Get the latest values from SettingUtils to ensure we're using current settings
+        const repoUrl = this.settingUtils.get("repoUrl") || this.config.repoUrl;
+        const token = this.settingUtils.get("token") || this.config.token;
+        
+        if (!repoUrl) {
+            showMessage("⚠️ Please configure repository URL", 3000, "error");
             return;
         }
 
@@ -173,25 +395,98 @@ export default class GitSyncPlugin extends Plugin {
             // Just test if we can access the repo by trying a fetch - don't actually clone
             await isogit.clone({
                 fs: this.fs,
-                http: this.getHttp(),
+                http,
                 dir: "/repo-test",
-                url: this.config.repoUrl,
+                url: repoUrl,
                 singleBranch: true,
                 depth: 1,
                 onAuth: () => {
+                    // Use token-based authentication for GitHub
+                    if (token) {
+                        return {
+                            username: token,  // For GitHub, token goes as username
+                            password: ""      // Password is empty when using token
+                        };
+                    }
+                    // Fallback to basic auth if no token
                     return {
                         username: "git",
-                        password: this.config.token
+                        password: ""
                     };
                 }
             });
             
-            // Clean up after test
-            await this.p.rm("/repo-test", { recursive: true, force: true });
+            // Clean up after test - LightningFS uses different methods for file operations
+            await this.cleanupTestRepo("/repo-test");
             
-            showMessage(`✅ Connected to: ${this.config.repoUrl}`, 3000, "info");
+            showMessage(`✅ Connected to: ${repoUrl}`, 3000, "info");
         } catch (error) {
-            this.showError("Connection test failed", error);
+            // Provide more helpful error messages based on the type of error
+            if (error instanceof Error) {
+                if (error.message.includes("401")) {
+                    if (token) {
+                        this.showError("Authentication failed - please check your token", error);
+                    } else {
+                        this.showError("Repository requires authentication - please provide a token", error);
+                    }
+                } else if (error.message.includes("404") || error.message.includes("not found")) {
+                    this.showError("Repository not found - please check the URL", error);
+                } else if (error.message.includes("ENOTFOUND") || error.message.includes("getaddrinfo")) {
+                    this.showError("Network error - please check your internet connection", error);
+                } else {
+                    this.showError("Connection test failed", error);
+                }
+            } else {
+                this.showError("Connection test failed", error);
+            }
+        }
+    }
+
+    /**
+     * Clean up temporary test repository directory
+     * @param path Path to the test repository directory to clean up
+     */
+    private async cleanupTestRepo(path: string = "/repo-test") {
+        try {
+            // Check if directory exists
+            const stats = await this.p.stat(path);
+            if (stats) {
+                // Recursively remove the test directory
+                await this.removeDirectoryRecursive(path);
+            }
+        } catch (error) {
+            // Directory doesn't exist or other error - that's fine
+            console.debug(`Cleanup: Could not remove test repo at ${path}`, error);
+        }
+    }
+
+    /**
+     * Recursively remove a directory and all its contents
+     * @param dirPath Path to the directory to remove
+     */
+    private async removeDirectoryRecursive(dirPath: string) {
+        try {
+            const items = await this.p.readdir(dirPath);
+            
+            // Remove all items in the directory
+            for (const item of items) {
+                const fullPath = `${dirPath}/${item}`;
+                const stats = await this.p.stat(fullPath);
+                
+                if (stats.isDirectory()) {
+                    // Recursively remove subdirectory
+                    await this.removeDirectoryRecursive(fullPath);
+                } else {
+                    // Remove file
+                    await this.p.unlink(fullPath);
+                }
+            }
+            
+            // Remove the now-empty directory
+            await this.p.rmdir(dirPath);
+        } catch (error) {
+            console.warn(`Failed to remove directory ${dirPath}:`, error);
+            // Continue with other cleanup operations
         }
     }
 
@@ -211,27 +506,66 @@ export default class GitSyncPlugin extends Plugin {
     }
 
     private async cloneRepo() {
+        // Get the latest values from SettingUtils to ensure we're using current settings
+        const repoUrl = this.settingUtils.get("repoUrl") || this.config.repoUrl;
+        const token = this.settingUtils.get("token") || this.config.token;
+        const branch = this.settingUtils.get("branch") || this.config.branch;
+        
+        if (!repoUrl) {
+            throw new Error("Repository URL must be configured before cloning");
+        }
+        
         try {
             showMessage("📥 Cloning repository...", 3000, "info");
             
             await isogit.clone({
                 fs: this.fs,
-                http: this.getHttp(),
+                http,
                 dir: "/repo",
-                url: this.config.repoUrl,
+                url: repoUrl,
                 singleBranch: true,
-                branch: this.config.branch,
+                branch: branch,
                 onAuth: () => {
+                    // Use token-based authentication for GitHub
+                    if (token) {
+                        return {
+                            username: token,  // For GitHub, token goes as username
+                            password: ""      // Password is empty when using token
+                        };
+                    }
+                    // Fallback to basic auth if no token
                     return {
                         username: "git",
-                        password: this.config.token
+                        password: ""
                     };
                 }
             });
             
+            // Update internal config in case they've changed
+            this.config.repoUrl = repoUrl;
+            this.config.token = token;
+            this.config.branch = branch;
+            
             showMessage("✅ Repository cloned successfully", 3000, "info");
         } catch (error) {
-            this.showError("Failed to clone repository", error);
+            // Provide more helpful error messages based on the type of error
+            if (error instanceof Error) {
+                if (error.message.includes("401")) {
+                    if (token) {
+                        this.showError("Authentication failed - please check your token", error);
+                    } else {
+                        this.showError("Repository requires authentication - please provide a token", error);
+                    }
+                } else if (error.message.includes("404") || error.message.includes("not found")) {
+                    this.showError("Repository not found - please check the URL", error);
+                } else if (error.message.includes("ENOTFOUND") || error.message.includes("getaddrinfo")) {
+                    this.showError("Network error - please check your internet connection", error);
+                } else {
+                    this.showError("Failed to clone repository", error);
+                }
+            } else {
+                this.showError("Failed to clone repository", error);
+            }
             throw error;
         }
     }
@@ -251,7 +585,7 @@ export default class GitSyncPlugin extends Plugin {
             // Pull latest changes
             const result = await isogit.pull({
                 fs: this.fs,
-                http: this.getHttp(),
+                http,
                 dir: "/repo",
                 author: {
                     name: this.config.authorName,
@@ -260,9 +594,17 @@ export default class GitSyncPlugin extends Plugin {
                 singleBranch: true,
                 branch: this.config.branch,
                 onAuth: () => {
+                    // Use token-based authentication for GitHub
+                    if (this.config.token) {
+                        return {
+                            username: this.config.token,  // For GitHub, token goes as username
+                            password: ""      // Password is empty when using token
+                        };
+                    }
+                    // Fallback to basic auth if no token
                     return {
                         username: "git",
-                        password: this.config.token
+                        password: ""
                     };
                 }
             });
@@ -272,7 +614,24 @@ export default class GitSyncPlugin extends Plugin {
             
             showMessage(`✅ Pull completed\n${result ? `Merged: ${result.merge}` : 'Up to date'}`, 3000, "info");
         } catch (error) {
-            this.showError("Pull failed", error);
+            // Provide more helpful error messages based on the type of error
+            if (error instanceof Error) {
+                if (error.message.includes("401")) {
+                    if (this.config.token) {
+                        this.showError("Authentication failed - please check your token", error);
+                    } else {
+                        this.showError("Repository requires authentication - please provide a token", error);
+                    }
+                } else if (error.message.includes("404") || error.message.includes("not found")) {
+                    this.showError("Repository not found - please check the URL", error);
+                } else if (error.message.includes("ENOTFOUND") || error.message.includes("getaddrinfo")) {
+                    this.showError("Network error - please check your internet connection", error);
+                } else {
+                    this.showError("Pull failed", error);
+                }
+            } else {
+                this.showError("Pull failed", error);
+            }
         } finally {
             this.isSyncing = false;
         }
@@ -314,12 +673,20 @@ export default class GitSyncPlugin extends Plugin {
                 // Push to remote
                 await isogit.push({
                     fs: this.fs,
-                    http: this.getHttp(),
+                    http,
                     dir: "/repo",
                     onAuth: () => {
+                        // Use token-based authentication for GitHub
+                        if (this.config.token) {
+                            return {
+                                username: this.config.token,  // For GitHub, token goes as username
+                                password: ""      // Password is empty when using token
+                            };
+                        }
+                        // Fallback to basic auth if no token
                         return {
                             username: "git",
-                            password: this.config.token
+                            password: ""
                         };
                     }
                 });
@@ -329,7 +696,24 @@ export default class GitSyncPlugin extends Plugin {
                 showMessage("✅ No changes to push", 3000, "info");
             }
         } catch (error) {
-            this.showError("Push failed", error);
+            // Provide more helpful error messages based on the type of error
+            if (error instanceof Error) {
+                if (error.message.includes("401")) {
+                    if (this.config.token) {
+                        this.showError("Authentication failed - please check your token", error);
+                    } else {
+                        this.showError("Repository requires authentication - please provide a token", error);
+                    }
+                } else if (error.message.includes("404") || error.message.includes("not found")) {
+                    this.showError("Repository not found - please check the URL", error);
+                } else if (error.message.includes("ENOTFOUND") || error.message.includes("getaddrinfo")) {
+                    this.showError("Network error - please check your internet connection", error);
+                } else {
+                    this.showError("Push failed", error);
+                }
+            } else {
+                this.showError("Push failed", error);
+            }
         } finally {
             this.isSyncing = false;
         }
@@ -548,8 +932,12 @@ export default class GitSyncPlugin extends Plugin {
             // Show completion message with count
             showMessage("✅ Files synced from SiYuan to Git repo", 2000, "info");
         } catch (error) {
-            console.error("Error syncing files from SiYuan", error);
-            throw error;
+            // Check if the error is EEXIST (directory already exists) and ignore it
+            // Otherwise, throw the error
+            if (error.code !== 'EEXIST') {
+                console.error("Error syncing files from SiYuan", error);
+                throw error;
+            }
         }
     }
 
@@ -700,12 +1088,6 @@ export default class GitSyncPlugin extends Plugin {
         }
     }
 
-    private getHttp() {
-        // isomorphic-git in the browser should use fetch by default
-        // We return undefined to let isomorphic-git use the global fetch by default
-        return undefined;
-    }
-
     private showError(message: string, error?: any) {
         console.error(message, error);
         let errorMsg = `❌ ${message}`;
@@ -716,130 +1098,23 @@ export default class GitSyncPlugin extends Plugin {
     }
 
     private async openSetting() {
-        // Create a proper settings dialog using SiYuan's Dialog class
-        const html = `
-        <div class="b3-dialog__content">
-            <div class="fn__flex-column" style="height: 100%;">
-                <div class="fn__flex-1 fn__flex-column">
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Repository URL</div>
-                                <div class="fn__space"></div>
-                                <input id="repoUrl" class="b3-text-field fn__flex-1" value="${this.config.repoUrl}" placeholder="https://github.com/username/repo.git">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Branch</div>
-                                <div class="fn__space"></div>
-                                <input id="branch" class="b3-text-field fn__flex-1" value="${this.config.branch}" placeholder="main">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Git Token</div>
-                                <div class="fn__space"></div>
-                                <input id="token" type="password" class="b3-text-field fn__flex-1" value="${this.config.token}" placeholder="GitHub Personal Access Token">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Author Name</div>
-                                <div class="fn__space"></div>
-                                <input id="authorName" class="b3-text-field fn__flex-1" value="${this.config.authorName}" placeholder="Your name">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Author Email</div>
-                                <div class="fn__space"></div>
-                                <input id="authorEmail" type="email" class="b3-text-field fn__flex-1" value="${this.config.authorEmail}" placeholder="email@example.com">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Sync Interval (minutes)</div>
-                                <div class="fn__space"></div>
-                                <input id="syncInterval" type="number" min="5" class="b3-text-field fn__flex-1" value="${this.config.syncInterval}">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <input id="autoSync" type="checkbox" class="b3-switch"${this.config.autoSync ? " checked" : ""}>
-                                <div class="fn__space"></div>
-                                <span class="fn__flex-center">Enable Auto-Sync</span>
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <input id="syncOnChange" type="checkbox" class="b3-switch"${this.config.syncOnChange ? " checked" : ""}>
-                                <div class="fn__space"></div>
-                                <span class="fn__flex-center">Sync on Change</span>
-                            </label>
-                        </div>
-                    </div>
-                </div>
-                <div class="fn__hr"></div>
-                <div class="fn__flex">
-                    <div class="fn__flex-1"></div>
-                    <button id="testConnectionBtn" class="b3-button b3-button--outline" style="margin-right: 8px;">Test Connection</button>
-                    <button id="saveBtn" class="b3-button b3-button--outline">Save</button>
-                </div>
-            </div>
-        </div>
-        <div class="b3-dialog__action">
-        </div>
-        `;
+        // Open the settings using SiYuan's native settings dialog
+        this.setting.open();
+    }
+    
+    onLayoutReady() {
+        // Load settings when layout is ready
+        this.settingUtils.load();
         
-        // Use SiYuan's Dialog class directly instead of this.addDialog (which doesn't exist)
-        const dialog = new Dialog({
-            title: "Git Sync Settings",
-            content: html,
-            width: "600px",
-            height: "400px"
-        });
-
-        // Add event listeners
-        dialog.element.querySelector('#saveBtn')?.addEventListener('click', async () => {
-            this.config.repoUrl = (dialog.element.querySelector('#repoUrl') as HTMLInputElement).value;
-            this.config.branch = (dialog.element.querySelector('#branch') as HTMLInputElement).value;
-            this.config.token = (dialog.element.querySelector('#token') as HTMLInputElement).value;
-            this.config.authorName = (dialog.element.querySelector('#authorName') as HTMLInputElement).value;
-            this.config.authorEmail = (dialog.element.querySelector('#authorEmail') as HTMLInputElement).value;
-            this.config.syncInterval = parseInt((dialog.element.querySelector('#syncInterval') as HTMLInputElement).value) || 30;
-            this.config.autoSync = (dialog.element.querySelector('#autoSync') as HTMLInputElement).checked;
-            this.config.syncOnChange = (dialog.element.querySelector('#syncOnChange') as HTMLInputElement).checked;
-
-            await this.saveConfig();
-            dialog.destroy();
-            showMessage("✅ Settings saved", 2000, "info");
-        });
-
-        dialog.element.querySelector('#testConnectionBtn')?.addEventListener('click', () => {
-            this.testConnection();
-        });
+        // Update internal config with loaded values to ensure consistency
+        this.config.repoUrl = this.settingUtils.get("repoUrl") || this.config.repoUrl;
+        this.config.branch = this.settingUtils.get("branch") || this.config.branch;
+        this.config.token = this.settingUtils.get("token") || this.config.token;
+        this.config.authorName = this.settingUtils.get("authorName") || this.config.authorName;
+        this.config.authorEmail = this.settingUtils.get("authorEmail") || this.config.authorEmail;
+        this.config.autoSync = this.settingUtils.get("autoSync") ?? this.config.autoSync;
+        this.config.syncInterval = this.settingUtils.get("syncInterval") ?? this.config.syncInterval;
+        this.config.syncOnChange = this.settingUtils.get("syncOnChange") ?? this.config.syncOnChange;
     }
 
     // Menu actions

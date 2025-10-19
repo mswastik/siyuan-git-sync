@@ -8880,7 +8880,7 @@ function readOp(reader, source) {
     return reader.slice(byte);
   }
 }
-function fromValue(value) {
+function fromValue$1(value) {
   let queue = [value];
   return {
     next() {
@@ -8895,7 +8895,7 @@ function fromValue(value) {
     }
   };
 }
-function getIterator(iterable) {
+function getIterator$1(iterable) {
   if (iterable[Symbol.asyncIterator]) {
     return iterable[Symbol.asyncIterator]();
   }
@@ -8905,14 +8905,14 @@ function getIterator(iterable) {
   if (iterable.next) {
     return iterable;
   }
-  return fromValue(iterable);
+  return fromValue$1(iterable);
 }
 class StreamReader {
   constructor(stream) {
     if (typeof Buffer === "undefined") {
       throw new Error("Missing Buffer dependency");
     }
-    this.stream = getIterator(stream);
+    this.stream = getIterator$1(stream);
     this.buffer = null;
     this.cursor = 0;
     this.undoCursor = 0;
@@ -12411,8 +12411,8 @@ function translateSSHtoHTTP(url) {
 function calculateBasicAuthHeader({ username = "", password = "" }) {
   return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
 }
-async function forAwait(iterable, cb) {
-  const iter = getIterator(iterable);
+async function forAwait$1(iterable, cb) {
+  const iter = getIterator$1(iterable);
   while (true) {
     const { value, done } = await iter.next();
     if (value) await cb(value);
@@ -12420,10 +12420,10 @@ async function forAwait(iterable, cb) {
   }
   if (iter.return) iter.return();
 }
-async function collect(iterable) {
+async function collect$1(iterable) {
   let size = 0;
   const buffers = [];
-  await forAwait(iterable, (value) => {
+  await forAwait$1(iterable, (value) => {
     buffers.push(value);
     size += value.byteLength;
   });
@@ -12566,7 +12566,7 @@ const updateHeaders = (headers, auth) => {
 };
 const stringifyBody = async (res) => {
   try {
-    const data = Buffer.from(await collect(res.body));
+    const data = Buffer.from(await collect$1(res.body));
     const response = data.toString("utf8");
     const preview = response.length < 256 ? response : response.slice(0, 256) + "...";
     return { preview, response, data };
@@ -12940,7 +12940,7 @@ function splitLines(input) {
   const output = new FIFO();
   let tmp = "";
   (async () => {
-    await forAwait(input, (chunk) => {
+    await forAwait$1(input, (chunk) => {
       chunk = chunk.toString("utf8");
       tmp += chunk;
       while (true) {
@@ -13078,7 +13078,7 @@ async function parseUploadPackResponse(stream) {
   let nak = false;
   let done = false;
   return new Promise((resolve2, reject) => {
-    forAwait(packetlines, (data) => {
+    forAwait$1(packetlines, (data) => {
       const line = data.toString("utf8").trim();
       if (line.startsWith("shallow")) {
         const oid = line.slice(-41).trim();
@@ -13281,7 +13281,7 @@ async function _fetch({
     since,
     exclude
   });
-  const packbuffer = Buffer.from(await collect(packstream));
+  const packbuffer = Buffer.from(await collect$1(packstream));
   const raw = await GitRemoteHTTP2.connect({
     http,
     onProgress,
@@ -13379,7 +13379,7 @@ async function _fetch({
   };
   if (onProgress || onMessage) {
     const lines = splitLines(response.progress);
-    forAwait(lines, async (line) => {
+    forAwait$1(lines, async (line) => {
       if (onMessage) await onMessage(line);
       if (onProgress) {
         const matches = line.match(/([^:]*).*\((\d+?)\/(\d+?)\)/);
@@ -13393,7 +13393,7 @@ async function _fetch({
       }
     });
   }
-  const packfile = Buffer.from(await collect(response.packfile));
+  const packfile = Buffer.from(await collect$1(response.packfile));
   if (raw.body.error) throw raw.body.error;
   const packfileSha = packfile.slice(-20).toString("hex");
   const res = {
@@ -15513,7 +15513,7 @@ async function _pack({
 }
 async function _packObjects({ fs, cache, gitdir, oids, write }) {
   const buffers = await _pack({ fs, cache, gitdir, oids });
-  const packfile = Buffer.from(await collect(buffers));
+  const packfile = Buffer.from(await collect$1(buffers));
   const packfileSha = packfile.slice(-20).toString("hex");
   const filename = `pack-${packfileSha}.pack`;
   if (write) {
@@ -15929,7 +15929,7 @@ async function _push({
   const { packfile, progress } = await GitSideBand.demux(res.body);
   if (onMessage) {
     const lines = splitLines(progress);
-    forAwait(lines, async (line) => {
+    forAwait$1(lines, async (line) => {
       await onMessage(line);
     });
   }
@@ -17741,7 +17741,7 @@ async function writeTree({ fs, dir, gitdir = pathBrowserify.join(dir, ".git"), t
     throw err2;
   }
 }
-var index$2 = {
+var index$3 = {
   Errors,
   STAGE,
   TREE,
@@ -17827,7 +17827,7 @@ isomorphicGit.checkout = checkout;
 var clone_1 = isomorphicGit.clone = clone;
 var commit_1 = isomorphicGit.commit = commit;
 isomorphicGit.currentBranch = currentBranch;
-isomorphicGit.default = index$2;
+isomorphicGit.default = index$3;
 isomorphicGit.deleteBranch = deleteBranch;
 isomorphicGit.deleteRef = deleteRef;
 isomorphicGit.deleteRemote = deleteRemote;
@@ -17884,6 +17884,447 @@ isomorphicGit.writeObject = writeObject;
 isomorphicGit.writeRef = writeRef;
 isomorphicGit.writeTag = writeTag;
 isomorphicGit.writeTree = writeTree;
+function fromValue(value) {
+  let queue = [value];
+  return {
+    next() {
+      return Promise.resolve({ done: queue.length === 0, value: queue.pop() });
+    },
+    return() {
+      queue = [];
+      return {};
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    }
+  };
+}
+function getIterator(iterable) {
+  if (iterable[Symbol.asyncIterator]) {
+    return iterable[Symbol.asyncIterator]();
+  }
+  if (iterable[Symbol.iterator]) {
+    return iterable[Symbol.iterator]();
+  }
+  if (iterable.next) {
+    return iterable;
+  }
+  return fromValue(iterable);
+}
+async function forAwait(iterable, cb) {
+  const iter = getIterator(iterable);
+  while (true) {
+    const { value, done } = await iter.next();
+    if (value) await cb(value);
+    if (done) break;
+  }
+  if (iter.return) iter.return();
+}
+async function collect(iterable) {
+  let size = 0;
+  const buffers = [];
+  await forAwait(iterable, (value) => {
+    buffers.push(value);
+    size += value.byteLength;
+  });
+  const result = new Uint8Array(size);
+  let nextIndex = 0;
+  for (const buffer of buffers) {
+    result.set(buffer, nextIndex);
+    nextIndex += buffer.byteLength;
+  }
+  return result;
+}
+function fromStream(stream) {
+  if (stream[Symbol.asyncIterator]) return stream;
+  const reader = stream.getReader();
+  return {
+    next() {
+      return reader.read();
+    },
+    return() {
+      reader.releaseLock();
+      return {};
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    }
+  };
+}
+async function request({
+  onProgress,
+  url,
+  method = "GET",
+  headers = {},
+  body
+}) {
+  if (body) {
+    body = await collect(body);
+  }
+  const res = await fetch(url, { method, headers, body });
+  const iter = res.body && res.body.getReader ? fromStream(res.body) : [new Uint8Array(await res.arrayBuffer())];
+  headers = {};
+  for (const [key, value] of res.headers.entries()) {
+    headers[key] = value;
+  }
+  return {
+    url: res.url,
+    method: res.method,
+    statusCode: res.status,
+    statusMessage: res.statusText,
+    body: iter,
+    headers
+  };
+}
+var index$2 = { request };
+const createDefaultGetter = (type2) => {
+  let getter;
+  switch (type2) {
+    case "checkbox":
+      getter = (ele) => {
+        return ele.checked;
+      };
+      break;
+    case "select":
+    case "slider":
+    case "textinput":
+    case "textarea":
+      getter = (ele) => {
+        return ele.value;
+      };
+      break;
+    case "number":
+      getter = (ele) => {
+        return parseInt(ele.value);
+      };
+      break;
+    default:
+      getter = () => null;
+      break;
+  }
+  return getter;
+};
+const createDefaultSetter = (type2) => {
+  let setter;
+  switch (type2) {
+    case "checkbox":
+      setter = (ele, value) => {
+        ele.checked = value;
+      };
+      break;
+    case "select":
+    case "slider":
+    case "textinput":
+    case "textarea":
+    case "number":
+      setter = (ele, value) => {
+        ele.value = value;
+      };
+      break;
+    default:
+      setter = () => {
+      };
+      break;
+  }
+  return setter;
+};
+class SettingUtils {
+  constructor(args) {
+    this.settings = /* @__PURE__ */ new Map();
+    this.elements = /* @__PURE__ */ new Map();
+    this.name = args.name ?? "settings";
+    this.plugin = args.plugin;
+    this.file = this.name.endsWith(".json") ? this.name : `${this.name}.json`;
+    this.plugin.setting = new siyuan.Setting({
+      width: args.width,
+      height: args.height,
+      confirmCallback: () => {
+        for (let key of this.settings.keys()) {
+          this.updateValueFromElement(key);
+        }
+        let data = this.dump();
+        if (args.callback !== void 0) {
+          args.callback(data);
+        }
+        this.plugin.data[this.name] = data;
+        this.save(data);
+      },
+      destroyCallback: () => {
+        for (let key of this.settings.keys()) {
+          this.updateElementFromValue(key);
+        }
+      }
+    });
+  }
+  async load() {
+    let data = await this.plugin.loadData(this.file);
+    console.debug("Load config:", data);
+    if (data) {
+      for (let [key, item] of this.settings) {
+        item.value = (data == null ? void 0 : data[key]) ?? item.value;
+      }
+    }
+    this.plugin.data[this.name] = this.dump();
+    return data;
+  }
+  async save(data) {
+    data = data ?? this.dump();
+    await this.plugin.saveData(this.file, this.dump());
+    console.debug("Save config:", data);
+    return data;
+  }
+  /**
+   * read the data after saving
+   * @param key key name
+   * @returns setting item value
+   */
+  get(key) {
+    var _a;
+    return (_a = this.settings.get(key)) == null ? void 0 : _a.value;
+  }
+  /**
+   * Set data to this.settings, 
+   * but do not save it to the configuration file
+   * @param key key name
+   * @param value value
+   */
+  set(key, value) {
+    let item = this.settings.get(key);
+    if (item) {
+      item.value = value;
+      this.updateElementFromValue(key);
+    }
+  }
+  /**
+   * Set and save setting item value
+   * If you want to set and save immediately you can use this method
+   * @param key key name
+   * @param value value
+   */
+  async setAndSave(key, value) {
+    let item = this.settings.get(key);
+    if (item) {
+      item.value = value;
+      this.updateElementFromValue(key);
+      await this.save();
+    }
+  }
+  /**
+    * Read in the value of element instead of setting obj in real time
+    * @param key key name
+    * @param apply whether to apply the value to the setting object
+    *        if true, the value will be applied to the setting object
+    * @returns value in html
+    */
+  take(key, apply = false) {
+    let item = this.settings.get(key);
+    let element = this.elements.get(key);
+    if (!element) {
+      return;
+    }
+    if (apply) {
+      this.updateValueFromElement(key);
+    }
+    return item.getEleVal(element);
+  }
+  /**
+   * Read data from html and save it
+   * @param key key name
+   * @param value value
+   * @return value in html
+   */
+  async takeAndSave(key) {
+    let value = this.take(key, true);
+    await this.save();
+    return value;
+  }
+  /**
+   * Disable setting item
+   * @param key key name
+   */
+  disable(key) {
+    let element = this.elements.get(key);
+    if (element) {
+      element.disabled = true;
+    }
+  }
+  /**
+   * Enable setting item
+   * @param key key name
+   */
+  enable(key) {
+    let element = this.elements.get(key);
+    if (element) {
+      element.disabled = false;
+    }
+  }
+  /**
+   * 将设置项目导出为 JSON 对象
+   * @returns object
+   */
+  dump() {
+    let data = {};
+    for (let [key, item] of this.settings) {
+      if (item.type === "button") continue;
+      data[key] = item.value;
+    }
+    return data;
+  }
+  addItem(item) {
+    this.settings.set(item.key, item);
+    const IsCustom = item.type === "custom";
+    let error = IsCustom && (item.createElement === void 0 || item.getEleVal === void 0 || item.setEleVal === void 0);
+    if (error) {
+      console.error("The custom setting item must have createElement, getEleVal and setEleVal methods");
+      return;
+    }
+    if (item.getEleVal === void 0) {
+      item.getEleVal = createDefaultGetter(item.type);
+    }
+    if (item.setEleVal === void 0) {
+      item.setEleVal = createDefaultSetter(item.type);
+    }
+    if (item.createElement === void 0) {
+      let itemElement = this.createDefaultElement(item);
+      this.elements.set(item.key, itemElement);
+      this.plugin.setting.addItem({
+        title: item.title,
+        description: item == null ? void 0 : item.description,
+        direction: item == null ? void 0 : item.direction,
+        createActionElement: () => {
+          this.updateElementFromValue(item.key);
+          let element = this.getElement(item.key);
+          return element;
+        }
+      });
+    } else {
+      this.plugin.setting.addItem({
+        title: item.title,
+        description: item == null ? void 0 : item.description,
+        direction: item == null ? void 0 : item.direction,
+        createActionElement: () => {
+          let val = this.get(item.key);
+          let element = item.createElement(val);
+          this.elements.set(item.key, element);
+          return element;
+        }
+      });
+    }
+  }
+  createDefaultElement(item) {
+    var _a, _b, _c, _d, _e, _f, _g, _h, _i;
+    let itemElement;
+    const preventEnterConfirm = (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+      }
+    };
+    switch (item.type) {
+      case "checkbox":
+        let element = document.createElement("input");
+        element.type = "checkbox";
+        element.checked = item.value;
+        element.className = "b3-switch fn__flex-center";
+        itemElement = element;
+        element.onchange = ((_a = item.action) == null ? void 0 : _a.callback) ?? (() => {
+        });
+        break;
+      case "select":
+        let selectElement = document.createElement("select");
+        selectElement.className = "b3-select fn__flex-center fn__size200";
+        let options = (item == null ? void 0 : item.options) ?? {};
+        for (let val in options) {
+          let optionElement = document.createElement("option");
+          let text = options[val];
+          optionElement.value = val;
+          optionElement.text = text;
+          selectElement.appendChild(optionElement);
+        }
+        selectElement.value = item.value;
+        selectElement.onchange = ((_b = item.action) == null ? void 0 : _b.callback) ?? (() => {
+        });
+        itemElement = selectElement;
+        break;
+      case "slider":
+        let sliderElement = document.createElement("input");
+        sliderElement.type = "range";
+        sliderElement.className = "b3-slider fn__size200 b3-tooltips b3-tooltips__n";
+        sliderElement.ariaLabel = item.value;
+        sliderElement.min = ((_c = item.slider) == null ? void 0 : _c.min.toString()) ?? "0";
+        sliderElement.max = ((_d = item.slider) == null ? void 0 : _d.max.toString()) ?? "100";
+        sliderElement.step = ((_e = item.slider) == null ? void 0 : _e.step.toString()) ?? "1";
+        sliderElement.value = item.value;
+        sliderElement.onchange = () => {
+          var _a2;
+          sliderElement.ariaLabel = sliderElement.value;
+          (_a2 = item.action) == null ? void 0 : _a2.callback();
+        };
+        itemElement = sliderElement;
+        break;
+      case "textinput":
+        let textInputElement = document.createElement("input");
+        textInputElement.className = "b3-text-field fn__flex-center fn__size200";
+        textInputElement.value = item.value;
+        textInputElement.onchange = ((_f = item.action) == null ? void 0 : _f.callback) ?? (() => {
+        });
+        itemElement = textInputElement;
+        textInputElement.addEventListener("keydown", preventEnterConfirm);
+        break;
+      case "textarea":
+        let textareaElement = document.createElement("textarea");
+        textareaElement.className = "b3-text-field fn__block";
+        textareaElement.value = item.value;
+        textareaElement.onchange = ((_g = item.action) == null ? void 0 : _g.callback) ?? (() => {
+        });
+        itemElement = textareaElement;
+        break;
+      case "number":
+        let numberElement = document.createElement("input");
+        numberElement.type = "number";
+        numberElement.className = "b3-text-field fn__flex-center fn__size200";
+        numberElement.value = item.value;
+        itemElement = numberElement;
+        numberElement.addEventListener("keydown", preventEnterConfirm);
+        break;
+      case "button":
+        let buttonElement = document.createElement("button");
+        buttonElement.className = "b3-button b3-button--outline fn__flex-center fn__size200";
+        buttonElement.innerText = ((_h = item.button) == null ? void 0 : _h.label) ?? "Button";
+        buttonElement.onclick = ((_i = item.button) == null ? void 0 : _i.callback) ?? (() => {
+        });
+        itemElement = buttonElement;
+        break;
+      case "hint":
+        let hintElement = document.createElement("div");
+        hintElement.className = "b3-label fn__flex-center";
+        itemElement = hintElement;
+        break;
+    }
+    return itemElement;
+  }
+  /**
+   * return the setting element
+   * @param key key name
+   * @returns element
+   */
+  getElement(key) {
+    let element = this.elements.get(key);
+    return element;
+  }
+  updateValueFromElement(key) {
+    let item = this.settings.get(key);
+    if (item.type === "button") return;
+    let element = this.elements.get(key);
+    item.value = item.getEleVal(element);
+  }
+  updateElementFromValue(key) {
+    let item = this.settings.get(key);
+    if (item.type === "button") return;
+    let element = this.elements.get(key);
+    item.setEleVal(element, item.value);
+  }
+}
 if (typeof window !== "undefined" && !window.Buffer) {
   window.Buffer = require$$0$1.Buffer;
 }
@@ -17910,6 +18351,155 @@ class GitSyncPlugin extends siyuan.Plugin {
     const LightningFS = fsModule.default || fsModule;
     this.fs = new LightningFS("siyuan-git");
     this.p = this.fs.promises;
+    this.settingUtils = new SettingUtils({
+      plugin: this,
+      name: "git-sync-config"
+    });
+    this.settingUtils.addItem({
+      key: "repoUrl",
+      value: this.config.repoUrl,
+      type: "textinput",
+      title: "Repository URL",
+      description: "URL of your Git repository (e.g. https://github.com/username/repo.git)",
+      action: {
+        callback: async () => {
+          this.config.repoUrl = this.settingUtils.get("repoUrl");
+          if (this.config.autoSync && this.config.repoUrl && this.config.token) {
+            this.startAutoSync();
+          } else {
+            this.stopAutoSync();
+          }
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "branch",
+      value: this.config.branch,
+      type: "textinput",
+      title: "Branch",
+      description: "Git branch to sync with (e.g. main, master)",
+      action: {
+        callback: async () => {
+          this.config.branch = this.settingUtils.get("branch");
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "token",
+      value: this.config.token,
+      type: "textinput",
+      title: "Git Token",
+      description: "Personal Access Token for Git repository (leave empty if not using authentication)",
+      action: {
+        callback: async () => {
+          this.config.token = this.settingUtils.get("token");
+          if (this.config.autoSync && this.config.repoUrl && this.config.token) {
+            this.startAutoSync();
+          } else {
+            this.stopAutoSync();
+          }
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "authorName",
+      value: this.config.authorName,
+      type: "textinput",
+      title: "Author Name",
+      description: "Name to use for Git commits",
+      action: {
+        callback: async () => {
+          this.config.authorName = this.settingUtils.get("authorName");
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "authorEmail",
+      value: this.config.authorEmail,
+      type: "textinput",
+      title: "Author Email",
+      description: "Email to use for Git commits",
+      action: {
+        callback: async () => {
+          this.config.authorEmail = this.settingUtils.get("authorEmail");
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "syncInterval",
+      value: this.config.syncInterval,
+      type: "slider",
+      title: "Sync Interval (minutes)",
+      description: "Interval for automatic sync in minutes (minimum 5 minutes)",
+      slider: {
+        min: 5,
+        max: 120,
+        step: 5
+      },
+      action: {
+        callback: async () => {
+          this.config.syncInterval = this.settingUtils.get("syncInterval");
+          if (this.config.autoSync && this.config.repoUrl && this.config.token) {
+            this.startAutoSync();
+          }
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "autoSync",
+      value: this.config.autoSync,
+      type: "checkbox",
+      title: "Enable Auto-Sync",
+      description: "Automatically sync changes at the specified interval",
+      action: {
+        callback: async () => {
+          this.config.autoSync = this.settingUtils.get("autoSync");
+          if (this.config.autoSync && this.config.repoUrl && this.config.token) {
+            this.startAutoSync();
+          } else {
+            this.stopAutoSync();
+          }
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "syncOnChange",
+      value: this.config.syncOnChange,
+      type: "checkbox",
+      title: "Sync on Change",
+      description: "Automatically sync when documents are saved",
+      action: {
+        callback: async () => {
+          this.config.syncOnChange = this.settingUtils.get("syncOnChange");
+          if (this.config.syncOnChange) {
+            this.startChangeMonitoring();
+          } else {
+            this.stopChangeMonitoring();
+          }
+          await this.saveConfig();
+        }
+      }
+    });
+    this.settingUtils.addItem({
+      key: "testConnection",
+      value: "",
+      type: "button",
+      title: "Test Connection",
+      description: "Test connection to your Git repository",
+      button: {
+        label: "Test Connection",
+        callback: () => {
+          this.testConnection();
+        }
+      }
+    });
     await this.loadConfig();
     this.addTopBarIcon();
     this.setupEventListeners();
@@ -17932,6 +18522,9 @@ class GitSyncPlugin extends siyuan.Plugin {
       if (savedConfig) {
         this.config = { ...this.config, ...savedConfig };
         console.log("Config loaded successfully");
+        for (const [key, value] of Object.entries(savedConfig)) {
+          this.settingUtils.set(key, value);
+        }
       }
     } catch (e) {
       console.error("Failed to load config:", e);
@@ -17956,8 +18549,49 @@ class GitSyncPlugin extends siyuan.Plugin {
       icon: "iconCloud",
       title: "Git Sync",
       position: "right",
-      callback: () => {
-        this.openSetting();
+      callback: (event) => {
+        const menu = new siyuan.Menu();
+        menu.addItem({
+          icon: "iconSettings",
+          label: "Settings",
+          click: () => {
+            this.openSetting();
+          }
+        });
+        menu.addItem({
+          icon: "iconDownload",
+          label: "Pull from Git",
+          click: async () => {
+            await this.performPull();
+          }
+        });
+        menu.addItem({
+          icon: "iconUpload",
+          label: "Push to Git",
+          click: async () => {
+            await this.performPush();
+          }
+        });
+        menu.addItem({
+          icon: "iconRefresh",
+          label: "Full Sync",
+          click: async () => {
+            await this.performFullSync();
+          }
+        });
+        menu.addItem({
+          icon: "iconInfo",
+          label: "Show Status",
+          click: async () => {
+            await this.showStatus();
+          }
+        });
+        const rect = event.target.getBoundingClientRect();
+        menu.open({
+          x: rect.left,
+          y: rect.bottom,
+          h: rect.height
+        });
       }
     });
   }
@@ -17995,30 +18629,91 @@ class GitSyncPlugin extends siyuan.Plugin {
     console.log("✅ Stopped monitoring file changes");
   }
   async testConnection() {
-    if (!this.config.repoUrl || !this.config.token) {
-      siyuan.showMessage("⚠️ Please configure repository URL and token", 3e3, "error");
+    const repoUrl = this.settingUtils.get("repoUrl") || this.config.repoUrl;
+    const token = this.settingUtils.get("token") || this.config.token;
+    if (!repoUrl) {
+      siyuan.showMessage("⚠️ Please configure repository URL", 3e3, "error");
       return;
     }
     try {
       siyuan.showMessage("🔍 Testing connection...", 2e3, "info");
       await clone_1({
         fs: this.fs,
-        http: this.getHttp(),
+        http: index$2,
         dir: "/repo-test",
-        url: this.config.repoUrl,
+        url: repoUrl,
         singleBranch: true,
         depth: 1,
         onAuth: () => {
+          if (token) {
+            return {
+              username: token,
+              // For GitHub, token goes as username
+              password: ""
+              // Password is empty when using token
+            };
+          }
           return {
             username: "git",
-            password: this.config.token
+            password: ""
           };
         }
       });
-      await this.p.rm("/repo-test", { recursive: true, force: true });
-      siyuan.showMessage(`✅ Connected to: ${this.config.repoUrl}`, 3e3, "info");
+      await this.cleanupTestRepo("/repo-test");
+      siyuan.showMessage(`✅ Connected to: ${repoUrl}`, 3e3, "info");
     } catch (error) {
-      this.showError("Connection test failed", error);
+      if (error instanceof Error) {
+        if (error.message.includes("401")) {
+          if (token) {
+            this.showError("Authentication failed - please check your token", error);
+          } else {
+            this.showError("Repository requires authentication - please provide a token", error);
+          }
+        } else if (error.message.includes("404") || error.message.includes("not found")) {
+          this.showError("Repository not found - please check the URL", error);
+        } else if (error.message.includes("ENOTFOUND") || error.message.includes("getaddrinfo")) {
+          this.showError("Network error - please check your internet connection", error);
+        } else {
+          this.showError("Connection test failed", error);
+        }
+      } else {
+        this.showError("Connection test failed", error);
+      }
+    }
+  }
+  /**
+   * Clean up temporary test repository directory
+   * @param path Path to the test repository directory to clean up
+   */
+  async cleanupTestRepo(path2 = "/repo-test") {
+    try {
+      const stats = await this.p.stat(path2);
+      if (stats) {
+        await this.removeDirectoryRecursive(path2);
+      }
+    } catch (error) {
+      console.debug(`Cleanup: Could not remove test repo at ${path2}`, error);
+    }
+  }
+  /**
+   * Recursively remove a directory and all its contents
+   * @param dirPath Path to the directory to remove
+   */
+  async removeDirectoryRecursive(dirPath) {
+    try {
+      const items = await this.p.readdir(dirPath);
+      for (const item of items) {
+        const fullPath = `${dirPath}/${item}`;
+        const stats = await this.p.stat(fullPath);
+        if (stats.isDirectory()) {
+          await this.removeDirectoryRecursive(fullPath);
+        } else {
+          await this.p.unlink(fullPath);
+        }
+      }
+      await this.p.rmdir(dirPath);
+    } catch (error) {
+      console.warn(`Failed to remove directory ${dirPath}:`, error);
     }
   }
   async repoExists() {
@@ -18035,25 +18730,58 @@ class GitSyncPlugin extends siyuan.Plugin {
     }
   }
   async cloneRepo() {
+    const repoUrl = this.settingUtils.get("repoUrl") || this.config.repoUrl;
+    const token = this.settingUtils.get("token") || this.config.token;
+    const branch2 = this.settingUtils.get("branch") || this.config.branch;
+    if (!repoUrl) {
+      throw new Error("Repository URL must be configured before cloning");
+    }
     try {
       siyuan.showMessage("📥 Cloning repository...", 3e3, "info");
       await clone_1({
         fs: this.fs,
-        http: this.getHttp(),
+        http: index$2,
         dir: "/repo",
-        url: this.config.repoUrl,
+        url: repoUrl,
         singleBranch: true,
-        branch: this.config.branch,
+        branch: branch2,
         onAuth: () => {
+          if (token) {
+            return {
+              username: token,
+              // For GitHub, token goes as username
+              password: ""
+              // Password is empty when using token
+            };
+          }
           return {
             username: "git",
-            password: this.config.token
+            password: ""
           };
         }
       });
+      this.config.repoUrl = repoUrl;
+      this.config.token = token;
+      this.config.branch = branch2;
       siyuan.showMessage("✅ Repository cloned successfully", 3e3, "info");
     } catch (error) {
-      this.showError("Failed to clone repository", error);
+      if (error instanceof Error) {
+        if (error.message.includes("401")) {
+          if (token) {
+            this.showError("Authentication failed - please check your token", error);
+          } else {
+            this.showError("Repository requires authentication - please provide a token", error);
+          }
+        } else if (error.message.includes("404") || error.message.includes("not found")) {
+          this.showError("Repository not found - please check the URL", error);
+        } else if (error.message.includes("ENOTFOUND") || error.message.includes("getaddrinfo")) {
+          this.showError("Network error - please check your internet connection", error);
+        } else {
+          this.showError("Failed to clone repository", error);
+        }
+      } else {
+        this.showError("Failed to clone repository", error);
+      }
       throw error;
     }
   }
@@ -18068,7 +18796,7 @@ class GitSyncPlugin extends siyuan.Plugin {
       await this.ensureRepo();
       const result = await pull_1({
         fs: this.fs,
-        http: this.getHttp(),
+        http: index$2,
         dir: "/repo",
         author: {
           name: this.config.authorName,
@@ -18077,9 +18805,17 @@ class GitSyncPlugin extends siyuan.Plugin {
         singleBranch: true,
         branch: this.config.branch,
         onAuth: () => {
+          if (this.config.token) {
+            return {
+              username: this.config.token,
+              // For GitHub, token goes as username
+              password: ""
+              // Password is empty when using token
+            };
+          }
           return {
             username: "git",
-            password: this.config.token
+            password: ""
           };
         }
       });
@@ -18087,7 +18823,23 @@ class GitSyncPlugin extends siyuan.Plugin {
       siyuan.showMessage(`✅ Pull completed
 ${result ? `Merged: ${result.merge}` : "Up to date"}`, 3e3, "info");
     } catch (error) {
-      this.showError("Pull failed", error);
+      if (error instanceof Error) {
+        if (error.message.includes("401")) {
+          if (this.config.token) {
+            this.showError("Authentication failed - please check your token", error);
+          } else {
+            this.showError("Repository requires authentication - please provide a token", error);
+          }
+        } else if (error.message.includes("404") || error.message.includes("not found")) {
+          this.showError("Repository not found - please check the URL", error);
+        } else if (error.message.includes("ENOTFOUND") || error.message.includes("getaddrinfo")) {
+          this.showError("Network error - please check your internet connection", error);
+        } else {
+          this.showError("Pull failed", error);
+        }
+      } else {
+        this.showError("Pull failed", error);
+      }
     } finally {
       this.isSyncing = false;
     }
@@ -18116,12 +18868,20 @@ ${result ? `Merged: ${result.merge}` : "Up to date"}`, 3e3, "info");
         });
         await push_1({
           fs: this.fs,
-          http: this.getHttp(),
+          http: index$2,
           dir: "/repo",
           onAuth: () => {
+            if (this.config.token) {
+              return {
+                username: this.config.token,
+                // For GitHub, token goes as username
+                password: ""
+                // Password is empty when using token
+              };
+            }
             return {
               username: "git",
-              password: this.config.token
+              password: ""
             };
           }
         });
@@ -18130,7 +18890,23 @@ ${result ? `Merged: ${result.merge}` : "Up to date"}`, 3e3, "info");
         siyuan.showMessage("✅ No changes to push", 3e3, "info");
       }
     } catch (error) {
-      this.showError("Push failed", error);
+      if (error instanceof Error) {
+        if (error.message.includes("401")) {
+          if (this.config.token) {
+            this.showError("Authentication failed - please check your token", error);
+          } else {
+            this.showError("Repository requires authentication - please provide a token", error);
+          }
+        } else if (error.message.includes("404") || error.message.includes("not found")) {
+          this.showError("Repository not found - please check the URL", error);
+        } else if (error.message.includes("ENOTFOUND") || error.message.includes("getaddrinfo")) {
+          this.showError("Network error - please check your internet connection", error);
+        } else {
+          this.showError("Push failed", error);
+        }
+      } else {
+        this.showError("Push failed", error);
+      }
     } finally {
       this.isSyncing = false;
     }
@@ -18298,8 +19074,10 @@ ${result ? `Merged: ${result.merge}` : "Up to date"}`, 3e3, "info");
       await this.copyConfigFiles();
       siyuan.showMessage("✅ Files synced from SiYuan to Git repo", 2e3, "info");
     } catch (error) {
-      console.error("Error syncing files from SiYuan", error);
-      throw error;
+      if (error.code !== "EEXIST") {
+        console.error("Error syncing files from SiYuan", error);
+        throw error;
+      }
     }
   }
   async syncFilesToSiYuan() {
@@ -18406,11 +19184,6 @@ ${result ? `Merged: ${result.merge}` : "Up to date"}`, 3e3, "info");
       this.syncIntervalId = null;
     }
   }
-  getHttp() {
-    return {
-      fetch: globalThis && globalThis.fetch || fetch
-    };
-  }
   showError(message, error) {
     console.error(message, error);
     let errorMsg = `❌ ${message}`;
@@ -18421,124 +19194,18 @@ ${error.message}`;
     siyuan.showMessage(errorMsg, 6e3, "error");
   }
   async openSetting() {
-    var _a, _b;
-    const html = `
-        <div class="b3-dialog__content">
-            <div class="fn__flex-column" style="height: 100%;">
-                <div class="fn__flex-1 fn__flex-column">
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Repository URL</div>
-                                <div class="fn__space"></div>
-                                <input id="repoUrl" class="b3-text-field fn__flex-1" value="${this.config.repoUrl}" placeholder="https://github.com/username/repo.git">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Branch</div>
-                                <div class="fn__space"></div>
-                                <input id="branch" class="b3-text-field fn__flex-1" value="${this.config.branch}" placeholder="main">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Git Token</div>
-                                <div class="fn__space"></div>
-                                <input id="token" type="password" class="b3-text-field fn__flex-1" value="${this.config.token}" placeholder="GitHub Personal Access Token">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Author Name</div>
-                                <div class="fn__space"></div>
-                                <input id="authorName" class="b3-text-field fn__flex-1" value="${this.config.authorName}" placeholder="Your name">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Author Email</div>
-                                <div class="fn__space"></div>
-                                <input id="authorEmail" type="email" class="b3-text-field fn__flex-1" value="${this.config.authorEmail}" placeholder="email@example.com">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <div class="fn__flex-center">Sync Interval (minutes)</div>
-                                <div class="fn__space"></div>
-                                <input id="syncInterval" type="number" min="5" class="b3-text-field fn__flex-1" value="${this.config.syncInterval}">
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <input id="autoSync" type="checkbox" class="b3-switch"${this.config.autoSync ? " checked" : ""}>
-                                <div class="fn__space"></div>
-                                <span class="fn__flex-center">Enable Auto-Sync</span>
-                            </label>
-                        </div>
-                    </div>
-                    <div class="fn__16"></div>
-                    <div class="fn__flex">
-                        <div class="fn__flex-1">
-                            <label class="fn__flex">
-                                <input id="syncOnChange" type="checkbox" class="b3-switch"${this.config.syncOnChange ? " checked" : ""}>
-                                <div class="fn__space"></div>
-                                <span class="fn__flex-center">Sync on Change</span>
-                            </label>
-                        </div>
-                    </div>
-                </div>
-                <div class="fn__hr"></div>
-                <div class="fn__flex">
-                    <div class="fn__flex-1"></div>
-                    <button id="testConnectionBtn" class="b3-button b3-button--outline" style="margin-right: 8px;">Test Connection</button>
-                    <button id="saveBtn" class="b3-button b3-button--outline">Save</button>
-                </div>
-            </div>
-        </div>
-        <div class="b3-dialog__action">
-        </div>
-        `;
-    const dialog = new siyuan.Dialog({
-      title: "Git Sync Settings",
-      content: html,
-      width: "600px",
-      height: "400px"
-    });
-    (_a = dialog.element.querySelector("#saveBtn")) == null ? void 0 : _a.addEventListener("click", async () => {
-      this.config.repoUrl = dialog.element.querySelector("#repoUrl").value;
-      this.config.branch = dialog.element.querySelector("#branch").value;
-      this.config.token = dialog.element.querySelector("#token").value;
-      this.config.authorName = dialog.element.querySelector("#authorName").value;
-      this.config.authorEmail = dialog.element.querySelector("#authorEmail").value;
-      this.config.syncInterval = parseInt(dialog.element.querySelector("#syncInterval").value) || 30;
-      this.config.autoSync = dialog.element.querySelector("#autoSync").checked;
-      this.config.syncOnChange = dialog.element.querySelector("#syncOnChange").checked;
-      await this.saveConfig();
-      dialog.destroy();
-      siyuan.showMessage("✅ Settings saved", 2e3, "info");
-    });
-    (_b = dialog.element.querySelector("#testConnectionBtn")) == null ? void 0 : _b.addEventListener("click", () => {
-      this.testConnection();
-    });
+    this.setting.open();
+  }
+  onLayoutReady() {
+    this.settingUtils.load();
+    this.config.repoUrl = this.settingUtils.get("repoUrl") || this.config.repoUrl;
+    this.config.branch = this.settingUtils.get("branch") || this.config.branch;
+    this.config.token = this.settingUtils.get("token") || this.config.token;
+    this.config.authorName = this.settingUtils.get("authorName") || this.config.authorName;
+    this.config.authorEmail = this.settingUtils.get("authorEmail") || this.config.authorEmail;
+    this.config.autoSync = this.settingUtils.get("autoSync") ?? this.config.autoSync;
+    this.config.syncInterval = this.settingUtils.get("syncInterval") ?? this.config.syncInterval;
+    this.config.syncOnChange = this.settingUtils.get("syncOnChange") ?? this.config.syncOnChange;
   }
   // Menu actions
   async performPull() {
